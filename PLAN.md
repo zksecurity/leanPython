@@ -770,7 +770,7 @@ For non-deterministic tests, structural equivalence is checked.
 | 2 | Parser | Done |
 | 3 | Core interpreter (expressions, types) | Done |
 | 4 | Control flow and functions | Done |
-| 5 | Object model (classes, inheritance) | Not started |
+| 5 | Object model (classes, inheritance) | In progress (5A: core class system done) |
 | 6 | Module system | Not started |
 | 7a | Stdlib: core utilities | Not started |
 | 7b | Stdlib: data handling | Not started |

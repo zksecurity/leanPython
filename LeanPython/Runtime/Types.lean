@@ -38,6 +38,9 @@ inductive Value where
   | boundMethod : Value → String → Value
   | exception   : String → String → Value
   | generator   : HeapRef → Value
+  | classObj    : HeapRef → Value
+  | instance    : HeapRef → Value
+  | superObj    : Value → Value → Value
 
 instance : Inhabited Value where
   default := .none
@@ -67,6 +70,22 @@ structure FuncData where
   isGenerator : Bool
 
 -- ============================================================
+-- Class and instance data (stored on the heap)
+-- ============================================================
+
+/-- Runtime class data stored on the heap. -/
+structure ClassData where
+  name      : String
+  bases     : Array Value
+  mro       : Array Value
+  ns        : Std.HashMap String Value
+
+/-- Runtime instance data stored on the heap. -/
+structure InstanceData where
+  cls   : Value
+  attrs : Std.HashMap String Value
+
+-- ============================================================
 -- Heap objects
 -- ============================================================
 
@@ -77,6 +96,8 @@ inductive HeapObject where
   | setObj  : Array Value → HeapObject
   | funcObj : FuncData → HeapObject
   | generatorObj : Array Value → Nat → HeapObject
+  | classObjData : ClassData → HeapObject
+  | instanceObjData : InstanceData → HeapObject
 
 -- ============================================================
 -- Runtime errors
@@ -141,6 +162,10 @@ partial def Value.beq : Value → Value → Bool
   | _, .boundMethod _ _ => false
   | .exception a1 a2, .exception b1 b2 => a1 == b1 && a2 == b2
   | .generator a, .generator b => a == b
+  | .classObj a, .classObj b => a == b
+  | .instance a, .instance b => a == b
+  | .superObj _ _, _ => false
+  | _, .superObj _ _ => false
   -- Cross-type: bool/int interop (Python: True == 1, False == 0)
   | .bool a, .int b => (if a then 1 else 0) == b
   | .int a, .bool b => a == (if b then 1 else 0)
@@ -184,6 +209,9 @@ partial def Value.toStr : Value → String
   | .boundMethod _ method => s!"<bound method {method}>"
   | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
   | .generator _ => "<generator object>"
+  | .classObj _ => "<class>"
+  | .instance _ => "<instance>"
+  | .superObj _ _ => "<super>"
 
 /-- Convert a Value to its Python `repr()` representation. -/
 partial def Value.toRepr : Value → String
@@ -208,6 +236,9 @@ partial def Value.toRepr : Value → String
   | .boundMethod _ method => s!"<bound method {method}>"
   | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
   | .generator _ => "<generator object>"
+  | .classObj _ => "<class>"
+  | .instance _ => "<instance>"
+  | .superObj _ _ => "<super>"
 
 instance : ToString Value where
   toString := Value.toStr

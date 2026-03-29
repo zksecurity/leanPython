@@ -324,6 +324,43 @@ def typeName : Value → String
   | .boundMethod _ _ => "method"
   | .exception tn _ => tn
   | .generator _ => "generator"
+  | .classObj _ => "type"
+  | .instance _ => "instance"
+  | .superObj _ _ => "super"
+
+-- ============================================================
+-- Class heap operations
+-- ============================================================
+
+/-- Get class data from the heap. -/
+def heapGetClassData (ref : HeapRef) : InterpM ClassData := do
+  match ← heapGet ref with
+  | .classObjData cd => return cd
+  | _ => throwRuntimeError (.runtimeError "heap object is not a class")
+
+/-- Update class data on the heap. -/
+def heapSetClassData (ref : HeapRef) (cd : ClassData) : InterpM Unit :=
+  heapSet ref (.classObjData cd)
+
+/-- Get instance data from the heap. -/
+def heapGetInstanceData (ref : HeapRef) : InterpM InstanceData := do
+  match ← heapGet ref with
+  | .instanceObjData id_ => return id_
+  | _ => throwRuntimeError (.runtimeError "heap object is not an instance")
+
+/-- Update instance data on the heap. -/
+def heapSetInstanceData (ref : HeapRef) (id_ : InstanceData) : InterpM Unit :=
+  heapSet ref (.instanceObjData id_)
+
+/-- Allocate a class object on the heap. -/
+def allocClassObj (cd : ClassData) : InterpM Value := do
+  let ref ← heapAlloc (.classObjData cd)
+  return .classObj ref
+
+/-- Allocate an instance on the heap. -/
+def allocInstance (id_ : InstanceData) : InterpM Value := do
+  let ref ← heapAlloc (.instanceObjData id_)
+  return .instance ref
 
 -- ============================================================
 -- Generator heap operations

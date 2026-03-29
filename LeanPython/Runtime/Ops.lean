@@ -90,6 +90,9 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .boundMethod _ _ => return true
   | .exception _ _ => return true
   | .generator _ => return true
+  | .classObj _ => return true
+  | .instance _ => return true
+  | .superObj _ _ => return true
 
 -- ============================================================
 -- Deep equality (for == operator)
@@ -173,6 +176,17 @@ partial def valueToStr (v : Value) : InterpM String :=
     if msg.isEmpty then return typeName
     else return s!"{typeName}({msg})"
   | .generator _ => return "<generator object>"
+  | .classObj ref => do
+    let cd ← heapGetClassData ref
+    return s!"<class '{cd.name}'>"
+  | .instance ref => do
+    let id_ ← heapGetInstanceData ref
+    match id_.cls with
+    | .classObj cref => do
+      let cd ← heapGetClassData cref
+      return s!"<{cd.name} object>"
+    | _ => return "<instance>"
+  | .superObj _ _ => return "<super>"
   | .tuple elems => do
     let strs ← elems.toList.mapM valueRepr
     if elems.size == 1 then
@@ -557,6 +571,8 @@ private def isIdentical : Value → Value → Bool
   | .function a, .function b => a == b
   | .builtin a, .builtin b => a == b
   | .ellipsis, .ellipsis => true
+  | .classObj a, .classObj b => a == b
+  | .instance a, .instance b => a == b
   | _, _ => false
 
 /-- Evaluate a single comparison operation. -/

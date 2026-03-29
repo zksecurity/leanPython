@@ -318,6 +318,34 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     let fd ← heapGetFunc ref
     callUserFunc fd args kwargs
   | .boundMethod receiver method => callBoundMethod receiver method args
+  | .classObj cref => do
+    -- Instance creation: allocate instance, call __init__
+    let cd ← heapGetClassData cref
+    let inst ← allocInstance { cls := callee, attrs := {} }
+    -- Look up __init__ in MRO, tracking which class defines it
+    let mut initFound : Option (Value × Value) := none  -- (function, defining class)
+    for mroEntry in cd.mro do
+      match mroEntry with
+      | .classObj mref => do
+        let mcd ← heapGetClassData mref
+        if let some fn := mcd.ns["__init__"]? then
+          initFound := some (fn, mroEntry)
+          break
+      | _ => pure ()
+    -- Call __init__ if found, injecting __class__ for super() support
+    match initFound with
+    | some (fn, definingCls) =>
+      match fn with
+      | .function fref => do
+        let fd ← heapGetFunc fref
+        let scope ← bindFuncParams fd.params (inst :: args) kwargs fd.defaults fd.kwDefaults
+        let scopeWithClass := scope.insert "__class__" definingCls
+        let _ ← callRegularFunc fd scopeWithClass
+      | _ => let _ ← callValueDispatch fn (inst :: args) kwargs
+    | none =>
+      if !args.isEmpty then
+        throwTypeError s!"{cd.name}() takes no arguments"
+    return inst
   | .exception _ _ =>
     -- Exception objects are not callable, but exception classes are handled as builtins
     throwTypeError s!"'{typeName callee}' object is not callable"
@@ -523,6 +551,39 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     if attr == "__next__" || attr == "__iter__" || attr == "close" then
       return .boundMethod obj attr
     else throwAttributeError s!"'generator' object has no attribute '{attr}'"
+  | .classObj cref => do
+    let cd ← heapGetClassData cref
+    -- Look up in own namespace first, then walk MRO
+    for mroEntry in cd.mro do
+      match mroEntry with
+      | .classObj mref => do
+        let mcd ← heapGetClassData mref
+        if let some v := mcd.ns[attr]? then return v
+      | _ => pure ()
+    throwAttributeError s!"type object '{cd.name}' has no attribute '{attr}'"
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    -- Check instance attributes first
+    if let some v := id_.attrs[attr]? then return v
+    -- Then walk class MRO
+    match id_.cls with
+    | .classObj cref => do
+      let cd ← heapGetClassData cref
+      for mroEntry in cd.mro do
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if let some v := mcd.ns[attr]? then
+            -- If it's a function, return as bound method
+            match v with
+            | .function _ => return .boundMethod obj attr
+            | _ => return v
+        | _ => pure ()
+      throwAttributeError s!"'{cd.name}' object has no attribute '{attr}'"
+    | _ => throwAttributeError s!"instance has no attribute '{attr}'"
+  | .superObj _startAfterCls _inst =>
+    -- super().attr — resolved in callBoundMethod
+    return .boundMethod obj attr
   | _ => throwAttributeError s!"'{typeName obj}' object has no attribute '{attr}'"
 
 -- Subscript access
@@ -625,6 +686,12 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
           break
       if !found then newPairs := newPairs.push (key, value)
       heapSetDict ref newPairs
+    | .instance iref => do
+      let id_ ← heapGetInstanceData iref
+      heapSetInstanceData iref { id_ with attrs := id_.attrs.insert attr value }
+    | .classObj cref => do
+      let cd ← heapGetClassData cref
+      heapSetClassData cref { cd with ns := cd.ns.insert attr value }
     | _ => throwAttributeError s!"'{typeName objVal}' object attribute '{attr}' is read-only"
   | .starred inner _ => assignToTarget inner value
   | _ => throwRuntimeError (.runtimeError "invalid assignment target")
@@ -758,7 +825,9 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     for n in names do declareNonlocal n
 
   | .classDef cd => do
-    -- Minimal: run body in a scope, store as dict
+    -- Evaluate base classes
+    let bases ← cd.bases.mapM evalExpr
+    -- Execute class body in a new scope
     pushScope {}
     try execStmts cd.body
     catch
@@ -769,11 +838,30 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | s :: _ => s
       | [] => ({} : Scope)
     popScope
-    let mut entries : Array (Value × Value) := #[]
-    entries := entries.push (.str "__name__", .str cd.name)
+    -- Build namespace from class body scope
+    let mut ns : Std.HashMap String Value := {}
     for (k, v) in classScope do
-      entries := entries.push (.str k, v)
-    let classVal ← allocDict entries
+      ns := ns.insert k v
+    -- Compute linear MRO: [self, ...bases' MROs flattened]
+    let selfPlaceholder := Value.none  -- placeholder, replaced after allocation
+    let mut mro : Array Value := #[selfPlaceholder]
+    for base in bases do
+      match base with
+      | .classObj bref => do
+        let bcd ← heapGetClassData bref
+        for entry in bcd.mro do
+          -- Avoid duplicates
+          let isDup := mro.any fun e => Value.beq e entry
+          if !isDup then mro := mro.push entry
+      | _ => pure ()  -- ignore non-class bases for now
+    -- Allocate the class
+    let classVal ← allocClassObj { name := cd.name, bases := bases.toArray, mro := mro, ns := ns }
+    -- Fix MRO[0] to point to the actual class
+    match classVal with
+    | .classObj cref => do
+      let cd' ← heapGetClassData cref
+      heapSetClassData cref { cd' with mro := cd'.mro.set! 0 classVal }
+    | _ => pure ()
     setVariable cd.name classVal
 
   | .raise_ exprOpt cause _ => do
@@ -869,23 +957,21 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     | some other => do execStmts finally_; throw other
 
   | .with_ items body _ => do
+    -- Helper: try to get a named attribute from an object
+    let getAttr := fun (obj : Value) (name : String) => do
+      try
+        let v ← getAttributeValue obj name
+        return some v
+      catch
+      | .error (.attributeError _) => return (none : Option Value)
+      | other => throw other
     -- Evaluate context managers and call __enter__
     let mut managers : List (Value × Value) := []
     for item in items do
       let mgr ← evalExpr item.contextExpr
-      -- Try to call __enter__ on the manager
-      let entered ← match mgr with
-        | .dict ref => do
-          let pairs ← heapGetDict ref
-          let mut enterFn : Option Value := none
-          for (k, v) in pairs do
-            match k with
-            | .str s => if s == "__enter__" then enterFn := some v
-            | _ => pure ()
-          match enterFn with
-          | some fn => callValueDispatch fn [mgr] []
-          | none => pure mgr
-        | _ => pure mgr
+      let entered ← match ← getAttr mgr "__enter__" with
+        | some fn => callValueDispatch fn [mgr] []
+        | none => pure mgr
       if let some target := item.optionalVars then
         assignToTarget target entered
       managers := managers ++ [(mgr, entered)]
@@ -895,43 +981,23 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     catch
     | sig@(.error _) => bodyError := some sig
     | other => do
-      -- For control flow signals (return/break), still call __exit__ then re-throw
       for (mgr, _) in managers.reverse do
-        match mgr with
-        | .dict ref => do
-          let pairs ← heapGetDict ref
-          for (k, v) in pairs do
-            match k with
-            | .str s =>
-              if s == "__exit__" then do
-                let _ ← callValueDispatch v [mgr, .none, .none, .none] []
-            | _ => pure ()
-        | _ => pure ()
+        if let some fn ← getAttr mgr "__exit__" then
+          let _ ← callValueDispatch fn [mgr, .none, .none, .none] []
       throw other
     -- Call __exit__ on each manager in reverse order
     let mut suppressed := false
     for (mgr, _) in managers.reverse do
-      match mgr with
-      | .dict ref => do
-        let pairs ← heapGetDict ref
-        let mut exitFn : Option Value := none
-        for (k, v) in pairs do
-          match k with
-          | .str s => if s == "__exit__" then exitFn := some v
-          | _ => pure ()
-        match exitFn with
-        | some fn =>
-          let exitArgs := match bodyError with
-            | none => [mgr, .none, .none, .none]
-            | some (.error e) =>
-              let excType := Value.str (runtimeErrorTypeName e)
-              let excVal := Value.exception (runtimeErrorTypeName e) (runtimeErrorMessage e)
-              [mgr, excType, excVal, .none]
-            | _ => [mgr, .none, .none, .none]
-          let result ← callValueDispatch fn exitArgs []
-          if ← isTruthy result then suppressed := true
-        | none => pure ()
-      | _ => pure ()
+      if let some fn ← getAttr mgr "__exit__" then
+        let exitArgs := match bodyError with
+          | none => [mgr, .none, .none, .none]
+          | some (.error e) =>
+            let excType := Value.str (runtimeErrorTypeName e)
+            let excVal := Value.exception (runtimeErrorTypeName e) (runtimeErrorMessage e)
+            [mgr, excType, excVal, .none]
+          | _ => [mgr, .none, .none, .none]
+        let result ← callValueDispatch fn exitArgs []
+        if ← isTruthy result then suppressed := true
     -- Re-raise body error if not suppressed
     match bodyError with
     | some sig => if !suppressed then throw sig
@@ -1013,6 +1079,66 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
   | .tuple arr => callTupleMethod arr method args
   | .builtin name => callBuiltinTypeMethod name method args
   | .generator ref => callGeneratorMethod ref method args
+  | .instance iref => do
+    -- Look up method in instance's class MRO and call with self
+    let id_ ← heapGetInstanceData iref
+    match id_.cls with
+    | .classObj cref => do
+      let cd ← heapGetClassData cref
+      let mut found : Option (Value × Value) := none  -- (function, defining class)
+      for mroEntry in cd.mro do
+        if found.isSome then break
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if let some fn := mcd.ns[method]? then
+            found := some (fn, mroEntry)
+        | _ => pure ()
+      match found with
+      | some (fn, definingCls) =>
+        match fn with
+        | .function fref => do
+          let fd ← heapGetFunc fref
+          let scope ← bindFuncParams fd.params (receiver :: args) [] fd.defaults fd.kwDefaults
+          let scopeWithClass := scope.insert "__class__" definingCls
+          callRegularFunc fd scopeWithClass
+        | _ => callValueDispatch fn (receiver :: args) []
+      | none => throwAttributeError s!"'{cd.name}' object has no attribute '{method}'"
+    | _ => throwAttributeError s!"instance has no attribute '{method}'"
+  | .superObj startAfterCls inst => do
+    -- Look up method in MRO starting after startAfterCls
+    let instCls ← match inst with
+      | .instance iref => do
+        let id_ ← heapGetInstanceData iref
+        pure id_.cls
+      | _ => pure Value.none
+    match instCls with
+    | .classObj cref => do
+      let cd ← heapGetClassData cref
+      let mut pastStart := false
+      let mut found : Option (Value × Value) := none  -- (function, defining class)
+      for mroEntry in cd.mro do
+        if found.isSome then break
+        if !pastStart then
+          if Value.beq mroEntry startAfterCls then pastStart := true
+          continue
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if let some fn := mcd.ns[method]? then
+            found := some (fn, mroEntry)
+        | _ => pure ()
+      match found with
+      | some (fn, definingCls) =>
+        match fn with
+        | .function fref => do
+          let fd ← heapGetFunc fref
+          let scope ← bindFuncParams fd.params (inst :: args) [] fd.defaults fd.kwDefaults
+          let scopeWithClass := scope.insert "__class__" definingCls
+          callRegularFunc fd scopeWithClass
+        | _ => callValueDispatch fn (inst :: args) []
+      | none => throwAttributeError s!"'super' object has no attribute '{method}'"
+    | _ => throwAttributeError s!"'super' object has no attribute '{method}'"
   | _ => throwAttributeError s!"'{typeName receiver}' object has no attribute '{method}'"
 
 -- ============================================================

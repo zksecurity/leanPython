@@ -62,10 +62,15 @@ partial def builtinRange (args : List Value) : InterpM Value := do
       i := i + step_
   allocList elems
 
-/-- `type(obj)` - returns type name as string (stub; proper type objects in Phase 5). -/
-def builtinType (args : List Value) : InterpM Value := do
+/-- `type(obj)` - returns the type of an object. -/
+partial def builtinType (args : List Value) : InterpM Value := do
   match args with
-  | [v] => return .str s!"<class '{typeName v}'>"
+  | [v] =>
+    match v with
+    | .instance ref => do
+      let id_ ← heapGetInstanceData ref
+      return id_.cls
+    | _ => return .str s!"<class '{typeName v}'>"
   | _ => throwTypeError "type() takes 1 or 3 arguments"
 
 /-- `int(x)` - convert to int. -/
@@ -264,26 +269,54 @@ partial def builtinTuple (args : List Value) : InterpM Value := do
     return .tuple items
   | _ => throwTypeError "tuple() takes at most 1 argument"
 
-/-- `isinstance(obj, classinfo)` - basic type check by name. -/
-def builtinIsinstance (args : List Value) : InterpM Value := do
+/-- Check if an instance's class (or any class in its MRO) matches a target class. -/
+partial def isInstanceOfClass (instRef : HeapRef) (targetCls : Value) : InterpM Bool := do
+  let id_ ← heapGetInstanceData instRef
+  -- Walk the MRO of the instance's class
+  match id_.cls with
+  | .classObj cref => do
+    let cd ← heapGetClassData cref
+    -- Check each class in the MRO
+    for mroEntry in cd.mro do
+      if Value.beq mroEntry targetCls then return true
+    return false
+  | _ => return false
+
+/-- `isinstance(obj, classinfo)` - type check for both builtins and custom classes. -/
+partial def builtinIsinstance (args : List Value) : InterpM Value := do
   match args with
   | [obj, .str className] =>
     return .bool (typeName obj == className)
-  | [_obj, .builtin name] =>
+  | [obj, .builtin name] =>
     -- isinstance(x, int) where int is the builtin
-    let tn := typeName _obj
-    let isMatch := match name with
-      | "int" => tn == "int" || tn == "bool"
-      | "float" => tn == "float"
-      | "str" => tn == "str"
-      | "bool" => tn == "bool"
-      | "list" => tn == "list"
-      | "tuple" => tn == "tuple"
-      | "dict" => tn == "dict"
-      | "set" => tn == "set"
-      | "bytes" => tn == "bytes"
-      | _ => false
-    return .bool isMatch
+    match name with
+    | "object" => return .bool true  -- everything is an instance of object
+    | _ =>
+      let tn := typeName obj
+      let isMatch := match name with
+        | "int" => tn == "int" || tn == "bool"
+        | "float" => tn == "float"
+        | "str" => tn == "str"
+        | "bool" => tn == "bool"
+        | "list" => tn == "list"
+        | "tuple" => tn == "tuple"
+        | "dict" => tn == "dict"
+        | "set" => tn == "set"
+        | "bytes" => tn == "bytes"
+        | _ => false
+      return .bool isMatch
+  | [.instance instRef, .classObj _] =>
+    return .bool (← isInstanceOfClass instRef args[1]!)
+  | [.instance instRef, .tuple classes] => do
+    -- isinstance(obj, (ClassA, ClassB, ...))
+    for cls in classes do
+      match cls with
+      | .classObj _ =>
+        if ← isInstanceOfClass instRef cls then return .bool true
+      | .builtin "object" => return .bool true
+      | _ => pure ()
+    return .bool false
+  | [_, .classObj _] => return .bool false  -- non-instance is not an instance of a custom class
   | _ => throwTypeError "isinstance() takes 2 arguments"
 
 /-- `hash(obj)` - basic hash. -/
@@ -357,6 +390,7 @@ def builtinCallable (args : List Value) : InterpM Value := do
     | .function _ => true
     | .builtin _ => true
     | .boundMethod _ _ => true
+    | .classObj _ => true
     | _ => false)
   | _ => throwTypeError "callable() takes exactly one argument"
 
@@ -390,6 +424,29 @@ partial def callBuiltin (name : String) (args : List Value)
   | "list"       => builtinList args
   | "tuple"      => builtinTuple args
   | "isinstance" => builtinIsinstance args
+  | "issubclass" => do
+    match args with
+    | [.classObj aRef, .classObj _] => do
+      let cd ← heapGetClassData aRef
+      let mut found := false
+      for mroEntry in cd.mro do
+        if Value.beq mroEntry args[1]! then found := true; break
+      return .bool found
+    | [.classObj _, .builtin "object"] => return .bool true
+    | [_, _] => throwTypeError "issubclass() arg 1 must be a class"
+    | _ => throwTypeError "issubclass() takes 2 arguments"
+  | "object" => do
+    -- object() creates a base object — for now just return a plain instance
+    return .none
+  | "super" => do
+    match args with
+    | [] => do
+      -- Implicit super(): look up __class__ and self from current scope
+      let cls ← lookupVariable "__class__"
+      let self ← lookupVariable "self"
+      return .superObj cls self
+    | [cls, inst] => return .superObj cls inst
+    | _ => throwTypeError "super() takes 0 or 2 arguments"
   | "hash"       => builtinHash args
   | "id"         => builtinId args
   | "ord"        => builtinOrd args

@@ -409,3 +409,55 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- Nested generator calls
 #eval assertPy "def a():\n    yield 1\ndef b():\n    yield from a()\n    yield 2\ndef c():\n    yield from b()\n    yield 3\nprint(list(c()))\n" "[1, 2, 3]\n"
+
+-- ============================================================
+-- Phase 5A: Object Model — Classes, Instances, Inheritance
+-- ============================================================
+
+-- Basic class with method
+#eval assertPy "class Greeter:\n    def greet(self):\n        print('hello')\ng = Greeter()\ng.greet()\n" "hello\n"
+
+-- __init__ with parameters
+#eval assertPy "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\np = Point(3, 4)\nprint(p.x)\nprint(p.y)\n" "3\n4\n"
+
+-- Instance method accessing self attributes
+#eval assertPy "class Rect:\n    def __init__(self, w, h):\n        self.w = w\n        self.h = h\n    def area(self):\n        return self.w * self.h\nr = Rect(3, 5)\nprint(r.area())\n" "15\n"
+
+-- Class variable vs instance variable
+#eval assertPy "class Dog:\n    species = 'canine'\n    def __init__(self, name):\n        self.name = name\nd = Dog('Rex')\nprint(d.species)\nprint(d.name)\nprint(Dog.species)\n" "canine\nRex\ncanine\n"
+
+-- Single inheritance
+#eval assertPy "class Animal:\n    def speak(self):\n        return 'generic'\nclass Cat(Animal):\n    def purr(self):\n        return 'prrr'\nc = Cat()\nprint(c.speak())\nprint(c.purr())\n" "generic\nprrr\n"
+
+-- Method override
+#eval assertPy "class Base:\n    def greet(self):\n        return 'base'\nclass Child(Base):\n    def greet(self):\n        return 'child'\nb = Base()\nc = Child()\nprint(b.greet())\nprint(c.greet())\n" "base\nchild\n"
+
+-- super().__init__()
+#eval assertPy "class A:\n    def __init__(self, x):\n        self.x = x\nclass B(A):\n    def __init__(self, x, y):\n        super().__init__(x)\n        self.y = y\nb = B(10, 20)\nprint(b.x)\nprint(b.y)\n" "10\n20\n"
+
+-- super().method()
+#eval assertPy "class A:\n    def greet(self):\n        return 'A'\nclass B(A):\n    def greet(self):\n        return 'B+' + super().greet()\nprint(B().greet())\n" "B+A\n"
+
+-- isinstance with custom classes
+#eval assertPy "class Foo:\n    pass\nclass Bar(Foo):\n    pass\nf = Foo()\nb = Bar()\nprint(isinstance(f, Foo))\nprint(isinstance(b, Foo))\nprint(isinstance(b, Bar))\nprint(isinstance(f, Bar))\n" "True\nTrue\nTrue\nFalse\n"
+
+-- type() returns the class for instances
+#eval assertPy "class MyClass:\n    pass\nobj = MyClass()\nprint(type(obj) is MyClass)\n" "True\n"
+
+-- Multiple levels of inheritance
+#eval assertPy "class A:\n    def who(self):\n        return 'A'\nclass B(A):\n    pass\nclass C(B):\n    pass\nc = C()\nprint(c.who())\n" "A\n"
+
+-- Instance attribute shadows class attribute
+#eval assertPy "class Cnt:\n    val = 0\n    def inc(self):\n        self.val = self.val + 1\nc = Cnt()\nc.inc()\nc.inc()\nprint(c.val)\nprint(Cnt.val)\n" "2\n0\n"
+
+-- callable() on class
+#eval assertPy "class X:\n    pass\nprint(callable(X))\n" "True\n"
+
+-- Class with no __init__ and no args
+#eval assertPy "class Empty:\n    pass\ne = Empty()\nprint(type(e) is Empty)\n" "True\n"
+
+-- Multi-level super() chain
+#eval assertPy "class A:\n    def __init__(self, x):\n        self.x = x\nclass B(A):\n    def __init__(self, x, y):\n        super().__init__(x)\n        self.y = y\nclass C(B):\n    def __init__(self, x, y, z):\n        super().__init__(x, y)\n        self.z = z\nc = C(1, 2, 3)\nprint(c.x)\nprint(c.y)\nprint(c.z)\n" "1\n2\n3\n"
+
+-- Inherited __init__
+#eval assertPy "class A:\n    def __init__(self, v):\n        self.v = v\nclass B(A):\n    def double(self):\n        return self.v * 2\nb = B(5)\nprint(b.double())\n" "10\n"
