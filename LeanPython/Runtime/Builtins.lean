@@ -457,6 +457,26 @@ partial def callBuiltin (name : String) (args : List Value)
         | _ => throwTypeError "cannot convert to bytes"
       return .bytes result
     | _ => throwTypeError "bytes() takes at most 1 argument"
+  | "iter" => do
+    match args with
+    | [.generator ref] => return .generator ref
+    | [v] => do
+      let items ← iterValues v
+      allocGenerator items
+    | _ => throwTypeError "iter() takes exactly one argument"
+  | "next" => do
+    match args with
+    | [.generator ref] => do
+      let (buf, idx) ← heapGetGenerator ref
+      if idx >= buf.size then throwRuntimeError .stopIteration
+      heapSetGeneratorIdx ref (idx + 1)
+      return buf[idx]!
+    | [.generator ref, default_] => do
+      let (buf, idx) ← heapGetGenerator ref
+      if idx >= buf.size then return default_
+      heapSetGeneratorIdx ref (idx + 1)
+      return buf[idx]!
+    | _ => throwTypeError "next() requires a generator/iterator argument"
   -- Exception constructors
   | "ValueError" | "TypeError" | "KeyError" | "IndexError"
   | "RuntimeError" | "ZeroDivisionError" | "AssertionError"

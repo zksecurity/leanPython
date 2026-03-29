@@ -45,6 +45,7 @@ structure InterpreterState where
   nextRef         : Nat
   output          : List String
   activeException : Option RuntimeError
+  yieldAccumulator : Option (Array Value)
   deriving Inhabited
 
 /-- Create a fresh interpreter state. -/
@@ -56,7 +57,8 @@ def InterpreterState.initial : InterpreterState :=
     heap            := {}
     nextRef         := 0
     output          := []
-    activeException := none }
+    activeException := none
+    yieldAccumulator := none }
 
 -- ============================================================
 -- Interpreter monad
@@ -321,5 +323,27 @@ def typeName : Value → String
   | .ellipsis => "ellipsis"
   | .boundMethod _ _ => "method"
   | .exception tn _ => tn
+  | .generator _ => "generator"
+
+-- ============================================================
+-- Generator heap operations
+-- ============================================================
+
+/-- Get a generator object from the heap. -/
+def heapGetGenerator (ref : HeapRef) : InterpM (Array Value × Nat) := do
+  match ← heapGet ref with
+  | .generatorObj buf idx => return (buf, idx)
+  | _ => throwRuntimeError (.runtimeError "heap object is not a generator")
+
+/-- Update generator index on the heap. -/
+def heapSetGeneratorIdx (ref : HeapRef) (newIdx : Nat) : InterpM Unit := do
+  match ← heapGet ref with
+  | .generatorObj buf _ => heapSet ref (.generatorObj buf newIdx)
+  | _ => throwRuntimeError (.runtimeError "heap object is not a generator")
+
+/-- Allocate a generator on the heap. -/
+def allocGenerator (values : Array Value) : InterpM Value := do
+  let ref ← heapAlloc (.generatorObj values 0)
+  return .generator ref
 
 end LeanPython.Interpreter

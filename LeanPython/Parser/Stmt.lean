@@ -180,6 +180,9 @@ partial def parseSimpleStmt : ParserM Stmt := do
   | some (.keyword .del)     => parseDel
   | some (.keyword .import_) => parseImport
   | some (.keyword .from_)   => parseFromImport
+  | some (.keyword .yield_)  => do
+    let e ← parseExpression
+    return .expr e (← spanFrom start)
   | _ => parseExprOrAssign
 
 /-- Parse `return [expr]`. -/

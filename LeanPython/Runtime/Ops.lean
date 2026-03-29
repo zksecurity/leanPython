@@ -89,6 +89,7 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .builtin _ => return true
   | .boundMethod _ _ => return true
   | .exception _ _ => return true
+  | .generator _ => return true
 
 -- ============================================================
 -- Deep equality (for == operator)
@@ -171,6 +172,7 @@ partial def valueToStr (v : Value) : InterpM String :=
   | .exception typeName msg =>
     if msg.isEmpty then return typeName
     else return s!"{typeName}({msg})"
+  | .generator _ => return "<generator object>"
   | .tuple elems => do
     let strs ← elems.toList.mapM valueRepr
     if elems.size == 1 then
@@ -637,6 +639,11 @@ partial def iterValues (v : Value) : InterpM (Array Value) :=
     return (pairs.map Prod.fst)
   | .set ref => heapGetSet ref
   | .bytes b => return (b.toList.map (fun byte => Value.int byte.toNat)).toArray
+  | .generator ref => do
+    let (buf, idx) ← heapGetGenerator ref
+    let remaining := (buf.toList.drop idx).toArray
+    heapSetGeneratorIdx ref buf.size
+    return remaining
   | .boundMethod _ _ => throwTypeError s!"'{typeName v}' object is not iterable"
   | .exception _ _ => throwTypeError s!"'{typeName v}' object is not iterable"
   | _ => throwTypeError s!"'{typeName v}' object is not iterable"

@@ -179,7 +179,7 @@ partial def evalExpr (e : Expr) : InterpM Value := do
       | some expr => do return some (← evalExpr expr)
       | none => return none
     let st ← get
-    allocFunc (FuncData.mk "<lambda>" params [.return_ (some body) dummySpan] defaults.toArray kwDefaults.toArray st.localScopes.toArray)
+    allocFunc (FuncData.mk "<lambda>" params [.return_ (some body) dummySpan] defaults.toArray kwDefaults.toArray st.localScopes.toArray false)
 
   | .tuple elems _ => do
     let vals ← elems.mapM evalExpr
@@ -251,11 +251,26 @@ partial def evalExpr (e : Expr) : InterpM Value := do
   | .generatorExp elt generators _ => do
     let mut results : Array Value := #[]
     results ← evalCompGen generators (do return (← evalExpr elt)) results
-    allocList results
+    allocGenerator results
 
   | .await_ _ _ => throwNotImplemented "await"
-  | .yield_ _ _ => throwNotImplemented "yield"
-  | .yieldFrom _ _ => throwNotImplemented "yield from"
+  | .yield_ exprOpt _ => do
+    let v ← match exprOpt with
+      | some expr => evalExpr expr
+      | none => pure .none
+    let st ← get
+    match st.yieldAccumulator with
+    | some acc => set { st with yieldAccumulator := some (acc.push v) }
+    | none => throwRuntimeError (.runtimeError "yield outside generator function")
+    return .none
+  | .yieldFrom iterExpr _ => do
+    let iterVal ← evalExpr iterExpr
+    let items ← iterValues iterVal
+    let st ← get
+    match st.yieldAccumulator with
+    | some acc => set { st with yieldAccumulator := some (acc ++ items) }
+    | none => throwRuntimeError (.runtimeError "yield from outside generator function")
+    return .none
 
 -- Evaluate positional args, handling *args unpacking
 partial def evalArgList (args : List Expr) : InterpM (List Value) := do
@@ -312,6 +327,13 @@ partial def callValueDispatch (callee : Value) (args : List Value)
 partial def callUserFunc (fd : FuncData) (args : List Value)
     (kwargs : List (String × Value)) : InterpM Value := do
   let scope ← bindFuncParams fd.params args kwargs fd.defaults fd.kwDefaults
+  if fd.isGenerator then
+    callGeneratorFunc fd scope
+  else
+    callRegularFunc fd scope
+
+-- Call a regular (non-generator) function
+partial def callRegularFunc (fd : FuncData) (scope : Scope) : InterpM Value := do
   let st ← get
   let savedLocal := st.localScopes
   let savedGlobalDecls := st.globalDecls
@@ -332,6 +354,35 @@ partial def callUserFunc (fd : FuncData) (args : List Value)
     globalDecls   := savedGlobalDecls
     nonlocalDecls := savedNonlocalDecls }
   return result
+
+-- Call a generator function: execute body eagerly, collecting yielded values
+partial def callGeneratorFunc (fd : FuncData) (scope : Scope) : InterpM Value := do
+  let st ← get
+  let savedLocal := st.localScopes
+  let savedGlobalDecls := st.globalDecls
+  let savedNonlocalDecls := st.nonlocalDecls
+  let savedAccumulator := st.yieldAccumulator
+  set { st with
+    localScopes    := [scope] ++ fd.closure.toList
+    globalDecls    := [{}]
+    nonlocalDecls  := [{}]
+    yieldAccumulator := some #[] }
+  let _ ← do
+    try
+      execStmts fd.body
+      pure Value.none
+    catch
+    | .control (.return_ _) => pure Value.none
+    | other => throw other
+  let values := match (← get).yieldAccumulator with
+    | some acc => acc
+    | none => #[]
+  modify fun st' => { st' with
+    localScopes    := savedLocal
+    globalDecls    := savedGlobalDecls
+    nonlocalDecls  := savedNonlocalDecls
+    yieldAccumulator := savedAccumulator }
+  allocGenerator values
 
 -- Bind function arguments to parameters
 partial def bindFuncParams (params : Arguments) (args : List Value)
@@ -468,6 +519,10 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     match attr with
     | "args" => return .str (Value.toStr obj)
     | _ => throwAttributeError s!"'{typeName obj}' object has no attribute '{attr}'"
+  | .generator _ =>
+    if attr == "__next__" || attr == "__iter__" || attr == "close" then
+      return .boundMethod obj attr
+    else throwAttributeError s!"'generator' object has no attribute '{attr}'"
   | _ => throwAttributeError s!"'{typeName obj}' object has no attribute '{attr}'"
 
 -- Subscript access
@@ -662,7 +717,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | some e => do return some (← evalExpr e)
       | none => return none
     let st ← get
-    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray)
+    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body))
     setVariable fd.name funcVal
 
   | .asyncFunctionDef fd => do
@@ -672,7 +727,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | some e => do return some (← evalExpr e)
       | none => return none
     let st ← get
-    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray)
+    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body))
     setVariable fd.name funcVal
 
   | .pass_ _ => return
@@ -924,6 +979,25 @@ partial def deleteSubscriptValue (obj idx : Value) : InterpM Unit := do
 -- ============================================================
 
 -- ============================================================
+-- Generator method dispatch
+-- ============================================================
+
+partial def callGeneratorMethod (ref : HeapRef) (method : String)
+    (_args : List Value) : InterpM Value := do
+  match method with
+  | "__next__" => do
+    let (buf, idx) ← heapGetGenerator ref
+    if idx >= buf.size then throwRuntimeError .stopIteration
+    heapSetGeneratorIdx ref (idx + 1)
+    return buf[idx]!
+  | "__iter__" => return .generator ref
+  | "close" => do
+    let (buf, _) ← heapGetGenerator ref
+    heapSetGeneratorIdx ref buf.size
+    return .none
+  | _ => throwAttributeError s!"'generator' object has no attribute '{method}'"
+
+-- ============================================================
 -- Bound method dispatch
 -- ============================================================
 
@@ -938,6 +1012,7 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
   | .bytes b => callBytesMethod b method args
   | .tuple arr => callTupleMethod arr method args
   | .builtin name => callBuiltinTypeMethod name method args
+  | .generator ref => callGeneratorMethod ref method args
   | _ => throwAttributeError s!"'{typeName receiver}' object has no attribute '{method}'"
 
 -- ============================================================

@@ -207,6 +207,7 @@ partial def parseCallArgs (func : Expr) (start : SourceSpan) : ParserM Expr := d
 
 /-- Parse the argument list inside a call. -/
 partial def parseArgList : ParserM (List Expr × List CallKeyword) := do
+  let argStart ← currentSpan
   let mut positional : List Expr := []
   let mut keywords : List CallKeyword := []
   let mut first := true
@@ -232,8 +233,16 @@ partial def parseArgList : ParserM (List Expr × List CallKeyword) := do
       match kwResult with
       | some (n, val, sp) =>
         keywords := keywords ++ [CallKeyword.mk (some n) val (← spanFrom sp)]
-      | none =>
-        positional := positional ++ [← parseExpression]
+      | none => do
+        let e ← parseExpression
+        -- Handle generator expression as sole argument: f(expr for x in iter)
+        if (← isKeyword .for_) then
+          let comps ← parseComprehensionClauses
+          let genExpr := Expr.generatorExp e comps (← spanFrom argStart)
+          positional := positional ++ [genExpr]
+          break
+        else
+          positional := positional ++ [e]
   return (positional, keywords)
 
 /-- Parse subscript content: simple index, slice, or tuple of slices. -/

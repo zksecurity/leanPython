@@ -357,3 +357,55 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 #eval assertPy "try:\n    raise ValueError(\"x\") from TypeError(\"y\")\nexcept ValueError as e:\n    print(\"caught\")\n" "caught\n"
 #eval assertPy "try:\n    raise ValueError(\"x\") from None\nexcept ValueError as e:\n    print(\"ok\")\n" "ok\n"
+
+-- ============================================================
+-- Generators
+-- ============================================================
+
+-- Basic generator with sequential yields
+#eval assertPy "def gen():\n    yield 1\n    yield 2\n    yield 3\nfor x in gen():\n    print(x)\n" "1\n2\n3\n"
+
+-- Generator in for loop with list()
+#eval assertPy "def gen():\n    yield 10\n    yield 20\nprint(list(gen()))\n" "[10, 20]\n"
+
+-- Generator with arguments and loop body
+#eval assertPy "def squares(n):\n    for i in range(n):\n        yield i * i\nprint(list(squares(5)))\n" "[0, 1, 4, 9, 16]\n"
+
+-- Empty generator (has yield but returns immediately)
+#eval assertPy "def gen():\n    return\n    yield\nprint(list(gen()))\n" "[]\n"
+
+-- Conditional yields
+#eval assertPy "def evens(n):\n    for i in range(n):\n        if i % 2 == 0:\n            yield i\nprint(list(evens(6)))\n" "[0, 2, 4]\n"
+
+-- yield from a list
+#eval assertPy "def gen():\n    yield from [1, 2, 3]\nprint(list(gen()))\n" "[1, 2, 3]\n"
+
+-- yield from another generator
+#eval assertPy "def inner():\n    yield 1\n    yield 2\ndef outer():\n    yield from inner()\n    yield 3\nprint(list(outer()))\n" "[1, 2, 3]\n"
+
+-- next() builtin
+#eval assertPy "def gen():\n    yield 1\n    yield 2\ng = gen()\nprint(next(g))\nprint(next(g))\n" "1\n2\n"
+
+-- next() with default
+#eval assertPy "def gen():\n    yield 1\ng = gen()\nprint(next(g))\nprint(next(g, 99))\n" "1\n99\n"
+
+-- StopIteration on exhausted generator
+#eval assertPy "def gen():\n    yield 1\ng = gen()\nnext(g)\ntry:\n    next(g)\nexcept StopIteration:\n    print(\"stopped\")\n" "stopped\n"
+
+-- Generator expression
+#eval assertPy "print(sum(x * x for x in range(4)))\n" "14\n"
+
+-- Generator expression in for loop
+#eval assertPy "for x in (i * 2 for i in range(3)):\n    print(x)\n" "0\n2\n4\n"
+
+-- iter() and next() on a list
+#eval assertPy "it = iter([1, 2, 3])\nprint(next(it))\nprint(next(it))\nprint(next(it))\n" "1\n2\n3\n"
+
+-- Exhausted generator returns empty on second iteration
+#eval assertPy "def gen():\n    yield 1\ng = gen()\nprint(list(g))\nprint(list(g))\n" "[1]\n[]\n"
+
+-- Generator with yield None
+#eval assertPy "def gen():\n    yield\nfor x in gen():\n    print(x)\n" "None\n"
+
+-- Nested generator calls
+#eval assertPy "def a():\n    yield 1\ndef b():\n    yield from a()\n    yield 2\ndef c():\n    yield from b()\n    yield 3\nprint(list(c()))\n" "[1, 2, 3]\n"

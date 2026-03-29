@@ -384,4 +384,82 @@ end
 def dumpModule : Module → String
   | .module stmts => s!"Module({dumpList dumpStmt stmts})"
 
+-- ============================================================
+-- Yield detection (for identifying generator functions)
+-- ============================================================
+
+mutual
+
+partial def exprContainsYield : Expr → Bool
+  | .yield_ _ _ => true
+  | .yieldFrom _ _ => true
+  | .binOp l _ r _ => exprContainsYield l || exprContainsYield r
+  | .unaryOp _ e _ => exprContainsYield e
+  | .boolOp _ es _ => es.any exprContainsYield
+  | .compare e cs _ => exprContainsYield e || cs.any fun (_, ce) => exprContainsYield ce
+  | .call f args kw _ =>
+    exprContainsYield f || args.any exprContainsYield
+    || kw.any fun k => exprContainsYield k.value
+  | .attribute e _ _ => exprContainsYield e
+  | .subscript e i _ => exprContainsYield e || exprContainsYield i
+  | .starred e _ => exprContainsYield e
+  | .ifExp t b o _ => exprContainsYield t || exprContainsYield b || exprContainsYield o
+  | .lambda_ _ _ _ => false  -- nested lambda has its own generator status
+  | .listComp e cs _ => exprContainsYield e || cs.any compContainsYield
+  | .setComp e cs _ => exprContainsYield e || cs.any compContainsYield
+  | .dictComp k v cs _ =>
+    exprContainsYield k || exprContainsYield v || cs.any compContainsYield
+  | .generatorExp e cs _ => exprContainsYield e || cs.any compContainsYield
+  | .await_ e _ => exprContainsYield e
+  | .fstring es _ => es.any exprContainsYield
+  | .formattedValue e _ _ _ => exprContainsYield e
+  | .namedExpr t v _ => exprContainsYield t || exprContainsYield v
+  | .slice l u s _ =>
+    (match l with | some e => exprContainsYield e | none => false)
+    || (match u with | some e => exprContainsYield e | none => false)
+    || (match s with | some e => exprContainsYield e | none => false)
+  | .tuple es _ => es.any exprContainsYield
+  | .list_ es _ => es.any exprContainsYield
+  | .set_ es _ => es.any exprContainsYield
+  | .dict ps _ => ps.any fun (k, v) =>
+    (match k with | some e => exprContainsYield e | none => false) || exprContainsYield v
+  | _ => false
+
+partial def stmtContainsYield : Stmt → Bool
+  | .expr e _ => exprContainsYield e
+  | .assign ts v _ => ts.any exprContainsYield || exprContainsYield v
+  | .augAssign t _ v _ => exprContainsYield t || exprContainsYield v
+  | .annAssign _ _ v _ _ =>
+    match v with | some e => exprContainsYield e | none => false
+  | .return_ e _ => match e with | some ex => exprContainsYield ex | none => false
+  | .delete ts _ => ts.any exprContainsYield
+  | .raise_ e c _ =>
+    (match e with | some ex => exprContainsYield ex | none => false)
+    || (match c with | some cx => exprContainsYield cx | none => false)
+  | .assert_ t m _ =>
+    exprContainsYield t
+    || (match m with | some mx => exprContainsYield mx | none => false)
+  | .if_ t b e _ => exprContainsYield t || stmtsContainYield b || stmtsContainYield e
+  | .while_ t b e _ => exprContainsYield t || stmtsContainYield b || stmtsContainYield e
+  | .for_ _ i b e _ => exprContainsYield i || stmtsContainYield b || stmtsContainYield e
+  | .with_ _ b _ => stmtsContainYield b
+  | .try_ b hs e f _ =>
+    stmtsContainYield b || hs.any (fun h => stmtsContainYield h.body)
+    || stmtsContainYield e || stmtsContainYield f
+  | .global_ _ _ | .nonlocal_ _ _ | .pass_ _ | .break_ _ | .continue_ _ => false
+  | .functionDef _ | .asyncFunctionDef _ | .classDef _ => false  -- nested defs are separate
+  | .import_ _ _ | .importFrom _ _ _ _ => false
+  | .asyncFor _ i b e _ => exprContainsYield i || stmtsContainYield b || stmtsContainYield e
+  | .asyncWith _ b _ => stmtsContainYield b
+
+partial def compContainsYield : Comprehension → Bool
+  | .mk t i ifs_ _ =>
+    exprContainsYield t || exprContainsYield i || ifs_.any exprContainsYield
+
+partial def stmtsContainYield : List Stmt → Bool
+  | [] => false
+  | s :: rest => stmtContainsYield s || stmtsContainYield rest
+
+end
+
 end LeanPython.AST

@@ -37,6 +37,7 @@ inductive Value where
   | ellipsis
   | boundMethod : Value → String → Value
   | exception   : String → String → Value
+  | generator   : HeapRef → Value
 
 instance : Inhabited Value where
   default := .none
@@ -63,6 +64,7 @@ structure FuncData where
   defaults   : Array Value
   kwDefaults : Array (Option Value)
   closure    : ClosureEnv
+  isGenerator : Bool
 
 -- ============================================================
 -- Heap objects
@@ -74,6 +76,7 @@ inductive HeapObject where
   | dictObj : Array (Value × Value) → HeapObject
   | setObj  : Array Value → HeapObject
   | funcObj : FuncData → HeapObject
+  | generatorObj : Array Value → Nat → HeapObject
 
 -- ============================================================
 -- Runtime errors
@@ -137,6 +140,7 @@ partial def Value.beq : Value → Value → Bool
   | .boundMethod _ _, _ => false
   | _, .boundMethod _ _ => false
   | .exception a1 a2, .exception b1 b2 => a1 == b1 && a2 == b2
+  | .generator a, .generator b => a == b
   -- Cross-type: bool/int interop (Python: True == 1, False == 0)
   | .bool a, .int b => (if a then 1 else 0) == b
   | .int a, .bool b => a == (if b then 1 else 0)
@@ -179,6 +183,7 @@ partial def Value.toStr : Value → String
   | .ellipsis => "Ellipsis"
   | .boundMethod _ method => s!"<bound method {method}>"
   | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
+  | .generator _ => "<generator object>"
 
 /-- Convert a Value to its Python `repr()` representation. -/
 partial def Value.toRepr : Value → String
@@ -202,6 +207,7 @@ partial def Value.toRepr : Value → String
   | .ellipsis => "Ellipsis"
   | .boundMethod _ method => s!"<bound method {method}>"
   | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
+  | .generator _ => "<generator object>"
 
 instance : ToString Value where
   toString := Value.toStr
