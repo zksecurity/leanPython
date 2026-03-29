@@ -1,3 +1,6 @@
 [submodule "references/cpython"]
 	path = references/cpython
 	url = https://github.com/python/cpython.git
+[submodule "references/leanSpec"]
+	path = references/leanSpec
+	url = https://github.com/leanEthereum/leanSpec.git
