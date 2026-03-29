@@ -41,6 +41,9 @@ inductive Value where
   | classObj    : HeapRef → Value
   | instance    : HeapRef → Value
   | superObj    : Value → Value → Value
+  | staticMethod : Value → Value
+  | classMethod  : Value → Value
+  | property     : Value → Option Value → Option Value → Value
 
 instance : Inhabited Value where
   default := .none
@@ -166,6 +169,15 @@ partial def Value.beq : Value → Value → Bool
   | .instance a, .instance b => a == b
   | .superObj _ _, _ => false
   | _, .superObj _ _ => false
+  | .staticMethod a, .staticMethod b => Value.beq a b
+  | .classMethod a, .classMethod b => Value.beq a b
+  | .property a1 _ _, .property b1 _ _ => Value.beq a1 b1
+  | .staticMethod _, _ => false
+  | _, .staticMethod _ => false
+  | .classMethod _, _ => false
+  | _, .classMethod _ => false
+  | .property _ _ _, _ => false
+  | _, .property _ _ _ => false
   -- Cross-type: bool/int interop (Python: True == 1, False == 0)
   | .bool a, .int b => (if a then 1 else 0) == b
   | .int a, .bool b => a == (if b then 1 else 0)
@@ -212,6 +224,9 @@ partial def Value.toStr : Value → String
   | .classObj _ => "<class>"
   | .instance _ => "<instance>"
   | .superObj _ _ => "<super>"
+  | .staticMethod _ => "<staticmethod object>"
+  | .classMethod _ => "<classmethod object>"
+  | .property _ _ _ => "<property object>"
 
 /-- Convert a Value to its Python `repr()` representation. -/
 partial def Value.toRepr : Value → String
@@ -239,6 +254,9 @@ partial def Value.toRepr : Value → String
   | .classObj _ => "<class>"
   | .instance _ => "<instance>"
   | .superObj _ _ => "<super>"
+  | .staticMethod _ => "<staticmethod object>"
+  | .classMethod _ => "<classmethod object>"
+  | .property _ _ _ => "<property object>"
 
 instance : ToString Value where
   toString := Value.toStr
@@ -295,6 +313,7 @@ def builtinNames : List String :=
    "hex", "oct", "bin", "round", "pow", "divmod", "map", "filter",
    "iter", "next", "hasattr", "getattr", "setattr", "callable",
    "issubclass", "super", "object", "bytes",
+   "staticmethod", "classmethod", "property",
    -- Exception classes
    "ValueError", "TypeError", "KeyError", "IndexError",
    "RuntimeError", "ZeroDivisionError", "AssertionError",

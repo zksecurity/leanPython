@@ -93,6 +93,9 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .classObj _ => return true
   | .instance _ => return true
   | .superObj _ _ => return true
+  | .staticMethod _ => return true
+  | .classMethod _ => return true
+  | .property _ _ _ => return true
 
 -- ============================================================
 -- Deep equality (for == operator)
@@ -130,6 +133,8 @@ partial def valueEq (a b : Value) : InterpM Bool :=
     for i in [:a.size] do
       if !(← valueEq a[i]! b[i]!) then return false
     return true
+  -- Instance identity comparison (default Python __eq__)
+  | .instance a, .instance b => return (a == b)
   | _, _ => return false
 
 -- ============================================================
@@ -187,6 +192,9 @@ partial def valueToStr (v : Value) : InterpM String :=
       return s!"<{cd.name} object>"
     | _ => return "<instance>"
   | .superObj _ _ => return "<super>"
+  | .staticMethod _ => return "<staticmethod object>"
+  | .classMethod _ => return "<classmethod object>"
+  | .property _ _ _ => return "<property object>"
   | .tuple elems => do
     let strs ← elems.toList.mapM valueRepr
     if elems.size == 1 then

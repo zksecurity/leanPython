@@ -327,6 +327,9 @@ def typeName : Value → String
   | .classObj _ => "type"
   | .instance _ => "instance"
   | .superObj _ _ => "super"
+  | .staticMethod _ => "staticmethod"
+  | .classMethod _ => "classmethod"
+  | .property _ _ _ => "property"
 
 -- ============================================================
 -- Class heap operations

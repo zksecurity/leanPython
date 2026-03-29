@@ -461,3 +461,82 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- Inherited __init__
 #eval assertPy "class A:\n    def __init__(self, v):\n        self.v = v\nclass B(A):\n    def double(self):\n        return self.v * 2\nb = B(5)\nprint(b.double())\n" "10\n"
+
+-- ============================================================
+-- Phase 5B: Operator Overloading, Dunder Protocols, Decorators
+-- ============================================================
+
+-- __add__ operator overloading
+#eval assertPy "class Vec:\n    def __init__(self, x):\n        self.x = x\n    def __add__(self, other):\n        return Vec(self.x + other.x)\nv = Vec(1) + Vec(2)\nprint(v.x)\n" "3\n"
+
+-- __sub__
+#eval assertPy "class Num:\n    def __init__(self, v):\n        self.v = v\n    def __sub__(self, other):\n        return Num(self.v - other.v)\nprint((Num(10) - Num(3)).v)\n" "7\n"
+
+-- __mul__
+#eval assertPy "class Num:\n    def __init__(self, v):\n        self.v = v\n    def __mul__(self, other):\n        return Num(self.v * other.v)\nprint((Num(3) * Num(4)).v)\n" "12\n"
+
+-- __eq__
+#eval assertPy "class C:\n    def __init__(self, v):\n        self.v = v\n    def __eq__(self, other):\n        return self.v == other.v\nprint(C(1) == C(1))\nprint(C(1) == C(2))\n" "True\nFalse\n"
+
+-- __lt__ and __le__
+#eval assertPy "class C:\n    def __init__(self, v):\n        self.v = v\n    def __lt__(self, other):\n        return self.v < other.v\nprint(C(1) < C(2))\nprint(C(2) < C(1))\n" "True\nFalse\n"
+
+-- __neg__ (unary operator)
+#eval assertPy "class C:\n    def __init__(self, v):\n        self.v = v\n    def __neg__(self):\n        return C(-self.v)\nprint((-C(5)).v)\n" "-5\n"
+
+-- __str__ via print()
+#eval assertPy "class C:\n    def __str__(self):\n        return 'hello from C'\nprint(C())\n" "hello from C\n"
+
+-- __str__ via str()
+#eval assertPy "class C:\n    def __str__(self):\n        return 'C_str'\nprint(str(C()))\n" "C_str\n"
+
+-- __repr__ via repr()
+#eval assertPy "class C:\n    def __repr__(self):\n        return 'C_repr'\nprint(repr(C()))\n" "C_repr\n"
+
+-- __len__ via len()
+#eval assertPy "class C:\n    def __len__(self):\n        return 42\nprint(len(C()))\n" "42\n"
+
+-- __getitem__
+#eval assertPy "class M:\n    def __init__(self):\n        self.data = [10, 20, 30]\n    def __getitem__(self, i):\n        return self.data[i]\nm = M()\nprint(m[1])\n" "20\n"
+
+-- __setitem__
+#eval assertPy "class M:\n    def __init__(self):\n        self.data = [0, 0, 0]\n    def __setitem__(self, i, v):\n        self.data[i] = v\n    def __getitem__(self, i):\n        return self.data[i]\nm = M()\nm[1] = 99\nprint(m[1])\n" "99\n"
+
+-- __contains__ (in operator)
+#eval assertPy "class C:\n    def __contains__(self, x):\n        return x == 1\nc = C()\nprint(1 in c)\nprint(2 in c)\n" "True\nFalse\n"
+
+-- __call__ (callable instances)
+#eval assertPy "class Adder:\n    def __init__(self, n):\n        self.n = n\n    def __call__(self, x):\n        return self.n + x\na = Adder(10)\nprint(a(5))\n" "15\n"
+
+-- __bool__ via bool()
+#eval assertPy "class C:\n    def __init__(self, v):\n        self.v = v\n    def __bool__(self):\n        return self.v > 0\nprint(bool(C(1)))\nprint(bool(C(0)))\n" "True\nFalse\n"
+
+-- __hash__
+#eval assertPy "class C:\n    def __hash__(self):\n        return 99\nprint(hash(C()))\n" "99\n"
+
+-- @staticmethod
+#eval assertPy "class C:\n    @staticmethod\n    def greet():\n        return 'hi'\nprint(C.greet())\nprint(C().greet())\n" "hi\nhi\n"
+
+-- @classmethod
+#eval assertPy "class C:\n    name = 'MyClass'\n    @classmethod\n    def who(cls):\n        return cls.name\nprint(C.who())\n" "MyClass\n"
+
+-- @classmethod on instance
+#eval assertPy "class C:\n    x = 10\n    @classmethod\n    def get_x(cls):\n        return cls.x\nprint(C().get_x())\n" "10\n"
+
+-- @property getter
+#eval assertPy "class C:\n    def __init__(self, v):\n        self._v = v\n    @property\n    def v(self):\n        return self._v\nc = C(42)\nprint(c.v)\n" "42\n"
+
+-- @property with setter
+#eval assertPy "class C:\n    def __init__(self, v):\n        self._v = v\n    @property\n    def v(self):\n        return self._v\n    @v.setter\n    def v(self, val):\n        self._v = val\nc = C(1)\nprint(c.v)\nc.v = 99\nprint(c.v)\n" "1\n99\n"
+
+-- Generic decorator
+#eval assertPy "def double_result(fn):\n    def wrapper(*args):\n        return fn(*args) * 2\n    return wrapper\n@double_result\ndef add(a, b):\n    return a + b\nprint(add(3, 4))\n" "14\n"
+
+-- Augmented assignment with dunder
+#eval assertPy "class Num:\n    def __init__(self, v):\n        self.v = v\n    def __add__(self, other):\n        return Num(self.v + other.v)\nn = Num(1)\nn = n + Num(2)\nprint(n.v)\n" "3\n"
+
+-- Operator overloading with inheritance
+#eval assertPy "class Base:\n    def __init__(self, v):\n        self.v = v\n    def __add__(self, other):\n        return Base(self.v + other.v)\nclass Child(Base):\n    pass\nc = Child(10) + Child(20)\nprint(c.v)\n" "30\n"
+
+-- Instance identity equality (no __eq__ defined)
+#eval assertPy "class C:\n    pass\na = C()\nb = C()\nprint(a == a)\nprint(a == b)\n" "True\nFalse\n"

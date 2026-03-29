@@ -111,10 +111,100 @@ private def knownTupleMethods : List String :=
   ["count", "index"]
 
 -- ============================================================
+-- Dunder method name mappings
+-- ============================================================
+
+private def binOpToDunder : BinOp → String
+  | .add => "__add__"
+  | .sub => "__sub__"
+  | .mult => "__mul__"
+  | .div => "__truediv__"
+  | .floorDiv => "__floordiv__"
+  | .mod => "__mod__"
+  | .pow => "__pow__"
+  | .lShift => "__lshift__"
+  | .rShift => "__rshift__"
+  | .bitOr => "__or__"
+  | .bitAnd => "__and__"
+  | .bitXor => "__xor__"
+  | .matMult => "__matmul__"
+
+private def binOpToRDunder : BinOp → String
+  | .add => "__radd__"
+  | .sub => "__rsub__"
+  | .mult => "__rmul__"
+  | .div => "__rtruediv__"
+  | .floorDiv => "__rfloordiv__"
+  | .mod => "__rmod__"
+  | .pow => "__rpow__"
+  | .lShift => "__rlshift__"
+  | .rShift => "__rrshift__"
+  | .bitOr => "__ror__"
+  | .bitAnd => "__rand__"
+  | .bitXor => "__rxor__"
+  | .matMult => "__rmatmul__"
+
+private def cmpOpToDunder : CmpOp → Option String
+  | .eq => some "__eq__"
+  | .notEq => some "__ne__"
+  | .lt => some "__lt__"
+  | .ltE => some "__le__"
+  | .gt => some "__gt__"
+  | .gtE => some "__ge__"
+  | .in_ => none
+  | .notIn => none
+  | .is_ => none
+  | .isNot => none
+
+private def unaryOpToDunder : UnaryOp → Option String
+  | .uSub => some "__neg__"
+  | .uAdd => some "__pos__"
+  | .invert => some "__invert__"
+  | .not_ => none
+
+-- ============================================================
 -- Mutual block: evalExpr, execStmt, and helpers
 -- ============================================================
 
 mutual
+
+-- ============================================================
+-- Dunder method lookup and dispatch
+-- ============================================================
+
+/-- Look up a dunder method on an instance's class MRO.
+    Returns the raw function Value and the defining class, or none. -/
+partial def lookupDunder (inst : Value) (name : String) : InterpM (Option (Value × Value)) := do
+  let cls ← match inst with
+    | .instance iref => do
+      let id_ ← heapGetInstanceData iref
+      pure id_.cls
+    | _ => pure Value.none
+  match cls with
+  | .classObj cref => do
+    let cd ← heapGetClassData cref
+    for mroEntry in cd.mro do
+      match mroEntry with
+      | .classObj mref => do
+        let mcd ← heapGetClassData mref
+        if let some fn := mcd.ns[name]? then
+          return some (fn, mroEntry)
+      | _ => pure ()
+    return none
+  | _ => return none
+
+/-- Call a dunder method on an instance. Returns none if the dunder is not defined. -/
+partial def callDunder (inst : Value) (name : String) (args : List Value) : InterpM (Option Value) := do
+  match ← lookupDunder inst name with
+  | some (fn, definingCls) =>
+    match fn with
+    | .function fref => do
+      let fd ← heapGetFunc fref
+      let scope ← bindFuncParams fd.params (inst :: args) [] fd.defaults fd.kwDefaults
+      let scopeWithClass := scope.insert "__class__" definingCls
+      some <$> callRegularFunc fd scopeWithClass
+    | _ => some <$> callValueDispatch fn (inst :: args) []
+  | none => return none
 
 partial def evalExpr (e : Expr) : InterpM Value := do
   match e with
@@ -124,11 +214,38 @@ partial def evalExpr (e : Expr) : InterpM Value := do
   | .binOp left op right _ => do
     let l ← evalExpr left
     let r ← evalExpr right
-    evalBinOp op l r
+    -- Try dunder dispatch for instances
+    match l with
+    | .instance _ =>
+      match ← callDunder l (binOpToDunder op) [r] with
+      | some result => return result
+      | none =>
+        -- Try reflected operator on right
+        match r with
+        | .instance _ =>
+          match ← callDunder r (binOpToRDunder op) [l] with
+          | some result => return result
+          | none => evalBinOp op l r
+        | _ => evalBinOp op l r
+    | _ =>
+      match r with
+      | .instance _ =>
+        match ← callDunder r (binOpToRDunder op) [l] with
+        | some result => return result
+        | none => evalBinOp op l r
+      | _ => evalBinOp op l r
 
   | .unaryOp op operand _ => do
     let v ← evalExpr operand
-    evalUnaryOp op v
+    match v with
+    | .instance _ =>
+      match unaryOpToDunder op with
+      | some dunName =>
+        match ← callDunder v dunName [] with
+        | some result => return result
+        | none => evalUnaryOp op v
+      | none => evalUnaryOp op v
+    | _ => evalUnaryOp op v
 
   | .boolOp op exprs _ => do
     match exprs with
@@ -142,7 +259,38 @@ partial def evalExpr (e : Expr) : InterpM Value := do
     let mut leftVal ← evalExpr left
     for (op, rightExpr) in comparators do
       let rightVal ← evalExpr rightExpr
-      let result ← evalCmpOp op leftVal rightVal
+      let result ← match leftVal with
+        | .instance _ =>
+          -- Try __contains__ for `in` operator (on the right/container)
+          if op == .in_ || op == .notIn then
+            match rightVal with
+            | .instance _ =>
+              match ← callDunder rightVal "__contains__" [leftVal] with
+              | some v => do
+                let b ← isTruthy v
+                pure (if op == .notIn then !b else b)
+              | none => evalCmpOp op leftVal rightVal
+            | _ => evalCmpOp op leftVal rightVal
+          else
+            match cmpOpToDunder op with
+            | some dunName =>
+              match ← callDunder leftVal dunName [rightVal] with
+              | some v => isTruthy v
+              | none => evalCmpOp op leftVal rightVal
+            | none => evalCmpOp op leftVal rightVal
+        | _ =>
+          -- Check if right operand is an instance for `in` operator
+          if op == .in_ || op == .notIn then
+            match rightVal with
+            | .instance _ =>
+              match ← callDunder rightVal "__contains__" [leftVal] with
+              | some v => do
+                let b ← isTruthy v
+                pure (if op == .notIn then !b else b)
+              | none => evalCmpOp op leftVal rightVal
+            | _ => evalCmpOp op leftVal rightVal
+          else
+            evalCmpOp op leftVal rightVal
       if !result then return .bool false
       leftVal := rightVal
     return .bool true
@@ -307,12 +455,77 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     (kwargs : List (String × Value)) : InterpM Value := do
   match callee with
   | .builtin name => do
-    -- Handle map/filter specially since they need callValueDispatch
+    -- Handle builtins that need callValueDispatch or dunder dispatch
     match name with
     | "map" => builtinMap args
     | "filter" => builtinFilter args
     | "hasattr" => builtinHasattr args
     | "getattr" => builtinGetattr args
+    | "setattr" => builtinSetattr args
+    | "staticmethod" => match args with
+      | [fn] => return .staticMethod fn
+      | _ => throwTypeError "staticmethod() takes exactly one argument"
+    | "classmethod" => match args with
+      | [fn] => return .classMethod fn
+      | _ => throwTypeError "classmethod() takes exactly one argument"
+    | "property" => match args with
+      | [] => return .property .none none none
+      | [fn] => return .property fn none none
+      | _ => throwTypeError "property() takes at most one argument"
+    | "str" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__str__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "repr" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__repr__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "len" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__len__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "hash" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__hash__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "bool" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__bool__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "iter" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__iter__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "next" => match args with
+      | [inst@(.instance _)] =>
+        match ← callDunder inst "__next__" [] with
+        | some v => return v
+        | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
+    | "print" => do
+      -- Convert instance args to strings via __str__ first
+      let mut args' : List Value := []
+      for arg in args do
+        match arg with
+        | .instance _ =>
+          match ← callDunder arg "__str__" [] with
+          | some (.str s) => args' := args' ++ [.str s]
+          | some v => args' := args' ++ [v]
+          | none => args' := args' ++ [arg]
+        | other => args' := args' ++ [other]
+      callBuiltin name args' kwargs
     | _ => callBuiltin name args kwargs
   | .function ref => do
     let fd ← heapGetFunc ref
@@ -346,6 +559,11 @@ partial def callValueDispatch (callee : Value) (args : List Value)
       if !args.isEmpty then
         throwTypeError s!"{cd.name}() takes no arguments"
     return inst
+  | .instance _ => do
+    -- Try __call__ dunder
+    match ← callDunder callee "__call__" args with
+    | some v => return v
+    | none => throwTypeError s!"'{typeName callee}' object is not callable"
   | .exception _ _ =>
     -- Exception objects are not callable, but exception classes are handled as builtins
     throwTypeError s!"'{typeName callee}' object is not callable"
@@ -558,29 +776,63 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
       match mroEntry with
       | .classObj mref => do
         let mcd ← heapGetClassData mref
-        if let some v := mcd.ns[attr]? then return v
+        if let some v := mcd.ns[attr]? then
+          match v with
+          | .staticMethod fn => return fn
+          | .classMethod _ => return .boundMethod obj attr
+          | .property _ _ _ => return v  -- on class, return the descriptor itself
+          | _ => return v
       | _ => pure ()
     throwAttributeError s!"type object '{cd.name}' has no attribute '{attr}'"
   | .instance iref => do
     let id_ ← heapGetInstanceData iref
-    -- Check instance attributes first
-    if let some v := id_.attrs[attr]? then return v
-    -- Then walk class MRO
+    -- Check for data descriptors (property) in MRO first (before instance attrs)
     match id_.cls with
     | .classObj cref => do
       let cd ← heapGetClassData cref
+      -- First pass: check for data descriptors (property with getter)
       for mroEntry in cd.mro do
         match mroEntry with
         | .classObj mref => do
           let mcd ← heapGetClassData mref
           if let some v := mcd.ns[attr]? then
-            -- If it's a function, return as bound method
+            match v with
+            | .property getter _ _ =>
+              -- Call the getter with self
+              match getter with
+              | .function fref => do
+                let fd ← heapGetFunc fref
+                let scope ← bindFuncParams fd.params [obj] [] fd.defaults fd.kwDefaults
+                return ← callRegularFunc fd scope
+              | .none => throwAttributeError s!"unreadable attribute '{attr}'"
+              | _ => return ← callValueDispatch getter [obj] []
+            | _ => pure ()  -- not a data descriptor, continue
+        | _ => pure ()
+      -- Check instance attributes
+      if let some v := id_.attrs[attr]? then return v
+      -- Then walk class MRO for non-data descriptors
+      for mroEntry in cd.mro do
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if let some v := mcd.ns[attr]? then
             match v with
             | .function _ => return .boundMethod obj attr
+            | .staticMethod fn => return fn
+            | .classMethod _ => return .boundMethod id_.cls attr
             | _ => return v
         | _ => pure ()
       throwAttributeError s!"'{cd.name}' object has no attribute '{attr}'"
-    | _ => throwAttributeError s!"instance has no attribute '{attr}'"
+    | _ =>
+      -- No class, check instance attrs only
+      if let some v := id_.attrs[attr]? then return v
+      throwAttributeError s!"instance has no attribute '{attr}'"
+  | .property _ _ _ =>
+    -- Attribute access on property object (e.g., prop.setter, prop.getter, prop.deleter)
+    match attr with
+    | "setter" | "getter" | "deleter" | "fget" | "fset" | "fdel" =>
+      return .boundMethod obj attr
+    | _ => throwAttributeError s!"'property' object has no attribute '{attr}'"
   | .superObj _startAfterCls _inst =>
     -- super().attr — resolved in callBoundMethod
     return .boundMethod obj attr
@@ -633,6 +885,10 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
       if ni < 0 || ni >= b.size then throwIndexError "index out of range"
       return .int b[ni.toNat]!.toNat
     | _ => throwTypeError "bytes indices must be integers"
+  | .instance _ => do
+    match ← callDunder obj "__getitem__" [idx] with
+    | some v => return v
+    | none => throwTypeError s!"'{typeName obj}' object is not subscriptable"
   | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
 
 -- Assignment target resolution
@@ -688,7 +944,28 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
       heapSetDict ref newPairs
     | .instance iref => do
       let id_ ← heapGetInstanceData iref
-      heapSetInstanceData iref { id_ with attrs := id_.attrs.insert attr value }
+      -- Check if the class has a property setter for this attr
+      let mut propSetter : Option Value := none
+      match id_.cls with
+      | .classObj cref => do
+        let cd ← heapGetClassData cref
+        for mroEntry in cd.mro do
+          if propSetter.isSome then break
+          match mroEntry with
+          | .classObj mref => do
+            let mcd ← heapGetClassData mref
+            match mcd.ns[attr]? with
+            | some (.property _ (some setter) _) => propSetter := some setter
+            | some (.property _ none _) => pure ()  -- property without setter
+            | _ => pure ()
+          | _ => pure ()
+      | _ => pure ()
+      match propSetter with
+      | some setter => do
+        let _ ← callValueDispatch setter [objVal, value] []
+        pure ()
+      | none =>
+        heapSetInstanceData iref { id_ with attrs := id_.attrs.insert attr value }
     | .classObj cref => do
       let cd ← heapGetClassData cref
       heapSetClassData cref { cd with ns := cd.ns.insert attr value }
@@ -717,6 +994,10 @@ partial def assignSubscriptValue (obj idx value : Value) : InterpM Unit := do
         break
     if !found then newPairs := newPairs.push (idx, value)
     heapSetDict ref newPairs
+  | .instance _ => do
+    match ← callDunder obj "__setitem__" [idx, value] with
+    | some _ => return ()
+    | none => throwTypeError s!"'{typeName obj}' does not support item assignment"
   | _ => throwTypeError s!"'{typeName obj}' does not support item assignment"
 
 -- ============================================================
@@ -738,7 +1019,12 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
   | .augAssign target op value _ => do
     let current ← evalExpr target
     let rhs ← evalExpr value
-    let result ← evalBinOp op current rhs
+    let result ← match current with
+      | .instance _ =>
+        match ← callDunder current (binOpToDunder op) [rhs] with
+        | some r => pure r
+        | none => evalBinOp op current rhs
+      | _ => evalBinOp op current rhs
     assignToTarget target result
 
   | .annAssign target _ann value _simple _ => do
@@ -785,7 +1071,12 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | none => return none
     let st ← get
     let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body))
-    setVariable fd.name funcVal
+    -- Apply decorators (innermost first = reverse the list)
+    let mut decorated := funcVal
+    for dec in fd.decoratorList.reverse do
+      let decVal ← evalExpr dec
+      decorated ← callValueDispatch decVal [decorated] []
+    setVariable fd.name decorated
 
   | .asyncFunctionDef fd => do
     -- Treat async as regular for now
@@ -795,7 +1086,12 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | none => return none
     let st ← get
     let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body))
-    setVariable fd.name funcVal
+    -- Apply decorators
+    let mut decorated := funcVal
+    for dec in fd.decoratorList.reverse do
+      let decVal ← evalExpr dec
+      decorated ← callValueDispatch decVal [decorated] []
+    setVariable fd.name decorated
 
   | .pass_ _ => return
   | .break_ _ => throwBreak
@@ -1038,6 +1334,10 @@ partial def deleteSubscriptValue (obj idx : Value) : InterpM Unit := do
       else newPairs := newPairs.push (k, v)
     if !found then throwKeyError (← valueRepr idx)
     heapSetDict ref newPairs
+  | .instance _ => do
+    match ← callDunder obj "__delitem__" [idx] with
+    | some _ => return ()
+    | none => throwTypeError s!"'{typeName obj}' does not support item deletion"
   | _ => throwTypeError s!"'{typeName obj}' does not support item deletion"
 
 -- ============================================================
@@ -1079,6 +1379,42 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
   | .tuple arr => callTupleMethod arr method args
   | .builtin name => callBuiltinTypeMethod name method args
   | .generator ref => callGeneratorMethod ref method args
+  | .property getter setter deleter =>
+    match method with
+    | "setter" => match args with
+      | [fn] => return .property getter (some fn) deleter
+      | _ => throwTypeError "setter() takes one argument"
+    | "getter" => match args with
+      | [fn] => return .property fn setter deleter
+      | _ => throwTypeError "getter() takes one argument"
+    | "deleter" => match args with
+      | [fn] => return .property getter setter (some fn)
+      | _ => throwTypeError "deleter() takes one argument"
+    | _ => throwAttributeError s!"'property' object has no attribute '{method}'"
+  | .classObj cref => do
+    -- Class-level method call (e.g., MyClass.method() or bound classmethod)
+    let cd ← heapGetClassData cref
+    let mut found : Option Value := none
+    for mroEntry in cd.mro do
+      if found.isSome then break
+      match mroEntry with
+      | .classObj mref => do
+        let mcd ← heapGetClassData mref
+        if let some fn := mcd.ns[method]? then
+          found := some fn
+      | _ => pure ()
+    match found with
+    | some (.classMethod innerFn) =>
+      callValueDispatch innerFn (receiver :: args) []
+    | some (.staticMethod innerFn) =>
+      callValueDispatch innerFn args []
+    | some (.function fref) => do
+      -- Regular function called on class (no self binding)
+      let fd ← heapGetFunc fref
+      let scope ← bindFuncParams fd.params args [] fd.defaults fd.kwDefaults
+      callRegularFunc fd scope
+    | some fn => callValueDispatch fn args []
+    | none => throwAttributeError s!"type object '{cd.name}' has no attribute '{method}'"
   | .instance iref => do
     -- Look up method in instance's class MRO and call with self
     let id_ ← heapGetInstanceData iref
@@ -1097,6 +1433,12 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
       match found with
       | some (fn, definingCls) =>
         match fn with
+        | .classMethod innerFn =>
+          -- Call with class as first arg instead of instance
+          callValueDispatch innerFn (id_.cls :: args) []
+        | .staticMethod innerFn =>
+          -- Call without self
+          callValueDispatch innerFn args []
         | .function fref => do
           let fd ← heapGetFunc fref
           let scope ← bindFuncParams fd.params (receiver :: args) [] fd.defaults fd.kwDefaults
@@ -1194,6 +1536,25 @@ partial def builtinGetattr (args : List Value) : InterpM Value := do
     | .error (.attributeError _) => return default_
     | other => throw other
   | _ => throwTypeError "getattr() takes 2 or 3 arguments"
+
+-- ============================================================
+-- setattr builtin
+-- ============================================================
+
+partial def builtinSetattr (args : List Value) : InterpM Value := do
+  match args with
+  | [obj, .str name, value] => do
+    match obj with
+    | .instance iref => do
+      let id_ ← heapGetInstanceData iref
+      heapSetInstanceData iref { id_ with attrs := id_.attrs.insert name value }
+      return .none
+    | .classObj cref => do
+      let cd ← heapGetClassData cref
+      heapSetClassData cref { cd with ns := cd.ns.insert name value }
+      return .none
+    | _ => throwTypeError s!"'{typeName obj}' object attribute '{name}' is read-only"
+  | _ => throwTypeError "setattr() takes exactly 3 arguments"
 
 -- ============================================================
 -- Int methods
