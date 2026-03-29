@@ -13,15 +13,25 @@ Python 3.12 interpreter in Lean4, targeting the leanSpec Ethereum consensus spec
 ```
 Lython.lean          — umbrella import for the library
 Lython/
-  Lexer.lean         — tokenizer
-  Parser.lean        — PEG parser
-  AST.lean           — Python AST node types
-  Interpreter.lean   — tree-walking interpreter
-  Runtime.lean       — runtime support (types, exceptions, stdlib)
+  Lexer.lean         — tokenizer entry point (imports sub-modules, exposes tokenize)
+  Lexer/
+    Types.lean       — SourcePos, SourceSpan, TokenKind, Token, LexError
+    Keywords.lean    — Python 3.12 keyword enum + lookup
+    Operators.lean   — Operator and Delimiter enums
+    State.lean       — LexerState, LexerM monad, char peek/advance helpers
+    Char.lean        — Character classification (isIdentStart, isHexDigit, etc.)
+    Number.lean      — Integer/float/imaginary literal lexing
+    StringLit.lean   — String/bytes/raw/f-string literal lexing
+    Indent.lean      — INDENT/DEDENT generation from leading whitespace
+    Core.lean        — Main tokenization loop, operator dispatch
+  Parser.lean        — PEG parser (stub)
+  AST.lean           — Python AST node types (stub)
+  Interpreter.lean   — tree-walking interpreter (stub)
+  Runtime.lean       — runtime support (stub)
 Main.lean            — CLI entry point
 LythonTest.lean      — test driver root
 LythonTest/
-  Basic.lean         — smoke tests
+  Basic.lean         — lexer tests (keywords, operators, numbers, strings, indent)
 ```
 
 ## Code Style
