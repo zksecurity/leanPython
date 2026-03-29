@@ -4,3 +4,6 @@
 [submodule "references/leanSpec"]
 	path = references/leanSpec
 	url = https://github.com/leanEthereum/leanSpec.git
+[submodule "references/pydantic"]
+	path = references/pydantic
+	url = https://github.com/pydantic/pydantic.git
