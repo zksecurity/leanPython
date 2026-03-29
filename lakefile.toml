@@ -1,15 +1,15 @@
-name = "Lython"
+name = "LeanPython"
 version = "0.1.0"
-defaultTargets = ["Lython"]
-testDriver = "LythonTest"
+defaultTargets = ["LeanPython"]
+testDriver = "LeanPythonTest"
 
 [[lean_lib]]
-name = "Lython"
+name = "LeanPython"
 
 [[lean_lib]]
-name = "LythonTest"
-globs = ["LythonTest.+"]
+name = "LeanPythonTest"
+globs = ["LeanPythonTest.+"]
 
 [[lean_exe]]
-name = "lython"
+name = "leanPython"
 root = "Main"

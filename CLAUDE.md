@@ -1,18 +1,18 @@
-# Lython
+# LeanPython
 
 Python 3.12 interpreter in Lean4, targeting the leanSpec Ethereum consensus spec.
 
 ## Build Commands
 
-- `lake build` — build the Lython library and executable
-- `lake test` — run tests (builds LythonTest driver; `#guard` failures = build errors)
-- `lake exe lython` — run the interpreter
+- `lake build` — build the LeanPython library and executable
+- `lake test` — run tests (builds LeanPythonTest driver; `#guard` failures = build errors)
+- `lake exe leanPython` — run the interpreter
 
 ## Project Structure
 
 ```
-Lython.lean          — umbrella import for the library
-Lython/
+LeanPython.lean          — umbrella import for the library
+LeanPython/
   Lexer.lean         — tokenizer entry point (imports sub-modules, exposes tokenize)
   Lexer/
     Types.lean       — SourcePos, SourceSpan, TokenKind, Token, LexError
@@ -46,8 +46,8 @@ Lython/
     Ops.lean         — Operator dispatch, truthiness, equality, comparison, iteration
     Builtins.lean    — Built-in function implementations (print, len, range, etc.)
 Main.lean            — CLI entry point (reads .py file, parses, interprets)
-LythonTest.lean      — test driver root
-LythonTest/
+LeanPythonTest.lean      — test driver root
+LeanPythonTest/
   Basic.lean         — lexer tests (keywords, operators, numbers, strings, indent)
   Parser.lean        — parser tests (expressions, statements, integration)
   Interpreter.lean   — interpreter tests (#eval-based, IO assertions)

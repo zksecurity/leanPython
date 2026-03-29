@@ -1,4 +1,4 @@
-# Lython: Python Interpreter in Lean4
+# LeanPython: Python Interpreter in Lean4
 
 ## Vision
 
@@ -101,9 +101,9 @@ The subset of Pydantic actually used is narrow:
 ## Architecture
 
 ```
-Lython/
+LeanPython/
   src/
-    Lython/
+    LeanPython/
       Lexer/           -- Tokenizer (Python 3.12 tokens)
       Parser/          -- PEG parser producing AST
       AST/             -- Python AST node types
@@ -569,7 +569,7 @@ This phase is split into sub-phases, each adding a group of related modules.
 
 **Testing strategy per sub-phase:**
 - **Unit tests**: Each function/class tested independently against CPython.
-- **Conformance tests**: Run the same test with both CPython and Lython,
+- **Conformance tests**: Run the same test with both CPython and LeanPython,
   compare output.
 - **leanSpec integration**: After each sub-phase, attempt to import and run
   progressively more of leanSpec.
@@ -675,9 +675,9 @@ every container, every type, every validation path uses it.
 
 **Testing strategy:**
 - **Golden test vectors**: For each sub-phase, generate test vectors from
-  CPython/leanSpec and verify Lython produces identical results.
+  CPython/leanSpec and verify LeanPython produces identical results.
 - **State transition tests**: Run leanSpec's own `tests/lean_spec/` test suite
-  through Lython and compare results.
+  through LeanPython and compare results.
 - **Fixture generation**: Run `tests/consensus/` fillers and verify the generated
   JSON fixtures match CPython output byte-for-byte.
 - **Hash comparison**: Every `hash_tree_root` call produces the same `Bytes32`
@@ -686,7 +686,7 @@ every container, every type, every validation path uses it.
   verify final state matches CPython.
 
 **Acceptance criteria:**
-- All leanSpec unit tests pass when run through Lython.
+- All leanSpec unit tests pass when run through LeanPython.
 - Generated consensus fixtures match CPython output.
 - State transition for multi-block sequences produces identical states.
 
@@ -723,7 +723,7 @@ The test infrastructure supports three modes:
    internals (lexer, parser, evaluator).
 
 2. **Python Conformance Tests**: A test runner that executes `.py` test files
-   through both CPython and Lython, comparing outputs. Directory structure:
+   through both CPython and LeanPython, comparing outputs. Directory structure:
    ```
    tests/
      conformance/
@@ -737,7 +737,7 @@ The test infrastructure supports three modes:
    ```
 
 3. **leanSpec Test Suite**: Run leanSpec's own `tests/lean_spec/` tests directly
-   through Lython.
+   through LeanPython.
 
 ### Conformance Testing Process
 
@@ -746,7 +746,7 @@ For each phase, conformance tests follow this pattern:
 ```
 1. Write Python test file (test_foo.py)
 2. Run with CPython -> capture output/state
-3. Run with Lython -> capture output/state
+3. Run with LeanPython -> capture output/state
 4. Assert outputs match
 ```
 
