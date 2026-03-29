@@ -1,4 +1,3 @@
-set_option autoImplicit false
-
-namespace Lython.Interpreter
-end Lython.Interpreter
+import Lython.Interpreter.Types
+import Lython.Interpreter.Eval
+import Lython.Interpreter.Core

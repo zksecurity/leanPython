@@ -105,6 +105,19 @@ inductive CallKeyword where
 
 end
 
+-- Inhabited instances for mutual types (needed for [i]! indexing in interpreter)
+instance : Inhabited Expr where
+  default := .constant .none_ { start := ⟨0, 0, 0⟩, stop := ⟨0, 0, 0⟩ }
+
+instance : Inhabited Arg where
+  default := .mk "" none { start := ⟨0, 0, 0⟩, stop := ⟨0, 0, 0⟩ }
+
+instance : Inhabited CallKeyword where
+  default := .mk none (default : Expr) { start := ⟨0, 0, 0⟩, stop := ⟨0, 0, 0⟩ }
+
+instance : Inhabited Comprehension where
+  default := .mk default default [] false
+
 /-! ## Standalone types (reference `Expr` only, not `Stmt`) -/
 
 /-- Import alias: `name [as asName]`. -/

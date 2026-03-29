@@ -35,13 +35,22 @@ Lython/
     Expr.lean        — Expression parser (18 precedence levels)
     Stmt.lean        — Statement parser (simple + compound statements)
     Core.lean        — Entry point: parse : String → Except String Module
-  Interpreter.lean   — tree-walking interpreter (stub)
-  Runtime.lean       — runtime support (stub)
-Main.lean            — CLI entry point
+  Interpreter.lean   — interpreter umbrella import
+  Interpreter/
+    Types.lean       — InterpreterState, InterpM monad, scope/heap helpers
+    Eval.lean        — evalExpr + execStmt (mutual block), method dispatch
+    Core.lean        — Entry point: interpret : String → IO (Except String (List String))
+  Runtime.lean       — runtime umbrella import
+  Runtime/
+    Types.lean       — Value, HeapRef, HeapObject, FuncData, RuntimeError, Scope
+    Ops.lean         — Operator dispatch, truthiness, equality, comparison, iteration
+    Builtins.lean    — Built-in function implementations (print, len, range, etc.)
+Main.lean            — CLI entry point (reads .py file, parses, interprets)
 LythonTest.lean      — test driver root
 LythonTest/
   Basic.lean         — lexer tests (keywords, operators, numbers, strings, indent)
   Parser.lean        — parser tests (expressions, statements, integration)
+  Interpreter.lean   — interpreter tests (#eval-based, IO assertions)
 ```
 
 ## Code Style
@@ -50,8 +59,11 @@ LythonTest/
 - No trailing whitespace
 - Follow existing patterns in the codebase
 - Do NOT use `/-! ... -/` module doc comments inside `mutual` blocks (they are commands, not comments; use `-- ...` instead)
-- Use `partial def` for all recursive parser functions
+- Use `partial def` for all recursive parser/interpreter functions
 - Structures cannot be in `mutual` blocks; use `inductive Foo where | mk : ...` instead
+- `Std.HashMap` and `Std.HashSet` require `import Std.Data.HashMap` / `import Std.Data.HashSet`; use `{}` for empty (not `.empty`)
+- Lean 4.29: `String.drop` returns `String.Slice`; use `String.ofList (s.toList.drop n)` for `String` result
+- Lean 4.29: `Array.eraseIdx` requires bounds proof; use `(arr.toList.take i ++ arr.toList.drop (i+1)).toArray` instead
 
 ## Development Plan
 

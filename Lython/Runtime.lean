@@ -1,4 +1,3 @@
-set_option autoImplicit false
-
-namespace Lython.Runtime
-end Lython.Runtime
+import Lython.Runtime.Types
+import Lython.Runtime.Ops
+import Lython.Runtime.Builtins

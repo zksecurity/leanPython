@@ -1,4 +1,14 @@
 import Lython
 
-def main : IO Unit :=
-  IO.println "Lython: Python 3.12 interpreter in Lean4"
+def main (args : List String) : IO UInt32 := do
+  match args with
+  | [path] =>
+    let source ← IO.FS.readFile path
+    match ← Lython.Interpreter.interpret source with
+    | .ok _ => return 0
+    | .error msg =>
+      IO.eprintln msg
+      return 1
+  | _ =>
+    IO.println "Usage: lython <file.py>"
+    return 1
