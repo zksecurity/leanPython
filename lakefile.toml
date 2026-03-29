@@ -1,0 +1,15 @@
+name = "Lython"
+version = "0.1.0"
+defaultTargets = ["Lython"]
+testDriver = "LythonTest"
+
+[[lean_lib]]
+name = "Lython"
+
+[[lean_lib]]
+name = "LythonTest"
+globs = ["LythonTest.+"]
+
+[[lean_exe]]
+name = "lython"
+root = "Main"
