@@ -318,3 +318,42 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 #eval assertPy "print(\"hello_world\".upper())\n" "HELLO_WORLD\n"
 #eval assertPy "print(\"a_b_c\".split(\"_\"))\n" "['a', 'b', 'c']\n"
 #eval assertPy "print(\"test_string\".startswith(\"test\"))\n" "True\n"
+
+-- ============================================================
+-- Attribute access and assignment on dict-objects (class dicts)
+-- ============================================================
+
+#eval assertPy "class Foo:\n    x = 10\nprint(Foo.x)\n" "10\n"
+#eval assertPy "class Foo:\n    x = 10\nFoo.x = 20\nprint(Foo.x)\n" "20\n"
+#eval assertPy "class Foo:\n    x = 10\nFoo.y = 99\nprint(Foo.y)\n" "99\n"
+
+-- Augmented attribute assignment
+#eval assertPy "class C:\n    count = 0\nC.count += 5\nprint(C.count)\n" "5\n"
+
+-- ============================================================
+-- String % formatting
+-- ============================================================
+
+#eval assertPy "print(\"hello %s\" % \"world\")\n" "hello world\n"
+#eval assertPy "print(\"%d + %d = %d\" % (1, 2, 3))\n" "1 + 2 = 3\n"
+#eval assertPy "print(\"val=%d\" % 42)\n" "val=42\n"
+#eval assertPy "print(\"100%%\" % ())\n" "100%\n"
+#eval assertPy "print(\"%x\" % 255)\n" "ff\n"
+#eval assertPy "print(\"%o\" % 8)\n" "10\n"
+
+-- ============================================================
+-- String .format() method
+-- ============================================================
+
+#eval assertPy "print(\"{} {}\".format(\"hello\", \"world\"))\n" "hello world\n"
+#eval assertPy "print(\"{0} {1}\".format(\"a\", \"b\"))\n" "a b\n"
+#eval assertPy "print(\"{1} {0}\".format(\"a\", \"b\"))\n" "b a\n"
+#eval assertPy "print(\"x={{y}}\".format())\n" "x={y}\n"
+#eval assertPy "print(\"{} is {}\".format(42, True))\n" "42 is True\n"
+
+-- ============================================================
+-- Exception chaining (raise X from Y)
+-- ============================================================
+
+#eval assertPy "try:\n    raise ValueError(\"x\") from TypeError(\"y\")\nexcept ValueError as e:\n    print(\"caught\")\n" "caught\n"
+#eval assertPy "try:\n    raise ValueError(\"x\") from None\nexcept ValueError as e:\n    print(\"ok\")\n" "ok\n"

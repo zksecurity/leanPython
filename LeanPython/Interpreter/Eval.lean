@@ -436,9 +436,16 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
   | .list _ =>
     if knownListMethods.contains attr then return .boundMethod obj attr
     else throwAttributeError s!"'list' object has no attribute '{attr}'"
-  | .dict _ =>
+  | .dict ref =>
     if knownDictMethods.contains attr then return .boundMethod obj attr
-    else throwAttributeError s!"'dict' object has no attribute '{attr}'"
+    else do
+      -- Check dict entries as attributes (for class/object dicts)
+      let pairs ← heapGetDict ref
+      for (k, v) in pairs do
+        match k with
+        | .str s => if s == attr then return v
+        | _ => pure ()
+      throwAttributeError s!"'dict' object has no attribute '{attr}'"
   | .set _ =>
     if knownSetMethods.contains attr then return .boundMethod obj attr
     else throwAttributeError s!"'set' object has no attribute '{attr}'"
@@ -548,7 +555,22 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
       | _ => pure ()
       for i in [:after.length] do
         assignToTarget after[i]! items[items.size - after.length + i]!
-  | .attribute _obj _attr _ => throwNotImplemented "attribute assignment"
+  | .attribute obj attr _ => do
+    let objVal ← evalExpr obj
+    match objVal with
+    | .dict ref => do
+      let pairs ← heapGetDict ref
+      let key := Value.str attr
+      let mut newPairs := pairs
+      let mut found := false
+      for i in [:pairs.size] do
+        if pairs[i]!.1 == key then
+          newPairs := newPairs.set! i (key, value)
+          found := true
+          break
+      if !found then newPairs := newPairs.push (key, value)
+      heapSetDict ref newPairs
+    | _ => throwAttributeError s!"'{typeName objVal}' object attribute '{attr}' is read-only"
   | .starred inner _ => assignToTarget inner value
   | _ => throwRuntimeError (.runtimeError "invalid assignment target")
 
@@ -699,7 +721,15 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     let classVal ← allocDict entries
     setVariable cd.name classVal
 
-  | .raise_ exprOpt _cause _ => do
+  | .raise_ exprOpt cause _ => do
+    -- Evaluate cause if present (for validation; chaining info not stored yet)
+    if let some causeExpr := cause then
+      let causeVal ← evalExpr causeExpr
+      match causeVal with
+      | .exception _ _ => pure ()
+      | .none => pure ()
+      | .builtin _ => pure ()
+      | _ => throwTypeError "exception cause must be None or derive from BaseException"
     match exprOpt with
     | some e => do
       let v ← evalExpr e
@@ -783,7 +813,74 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       modify fun st => { st with activeException := none }
     | some other => do execStmts finally_; throw other
 
-  | .with_ _items _body _ => throwNotImplemented "with statements"
+  | .with_ items body _ => do
+    -- Evaluate context managers and call __enter__
+    let mut managers : List (Value × Value) := []
+    for item in items do
+      let mgr ← evalExpr item.contextExpr
+      -- Try to call __enter__ on the manager
+      let entered ← match mgr with
+        | .dict ref => do
+          let pairs ← heapGetDict ref
+          let mut enterFn : Option Value := none
+          for (k, v) in pairs do
+            match k with
+            | .str s => if s == "__enter__" then enterFn := some v
+            | _ => pure ()
+          match enterFn with
+          | some fn => callValueDispatch fn [mgr] []
+          | none => pure mgr
+        | _ => pure mgr
+      if let some target := item.optionalVars then
+        assignToTarget target entered
+      managers := managers ++ [(mgr, entered)]
+    -- Execute body with cleanup
+    let mut bodyError : Option Signal := none
+    try execStmts body
+    catch
+    | sig@(.error _) => bodyError := some sig
+    | other => do
+      -- For control flow signals (return/break), still call __exit__ then re-throw
+      for (mgr, _) in managers.reverse do
+        match mgr with
+        | .dict ref => do
+          let pairs ← heapGetDict ref
+          for (k, v) in pairs do
+            match k with
+            | .str s =>
+              if s == "__exit__" then do
+                let _ ← callValueDispatch v [mgr, .none, .none, .none] []
+            | _ => pure ()
+        | _ => pure ()
+      throw other
+    -- Call __exit__ on each manager in reverse order
+    let mut suppressed := false
+    for (mgr, _) in managers.reverse do
+      match mgr with
+      | .dict ref => do
+        let pairs ← heapGetDict ref
+        let mut exitFn : Option Value := none
+        for (k, v) in pairs do
+          match k with
+          | .str s => if s == "__exit__" then exitFn := some v
+          | _ => pure ()
+        match exitFn with
+        | some fn =>
+          let exitArgs := match bodyError with
+            | none => [mgr, .none, .none, .none]
+            | some (.error e) =>
+              let excType := Value.str (runtimeErrorTypeName e)
+              let excVal := Value.exception (runtimeErrorTypeName e) (runtimeErrorMessage e)
+              [mgr, excType, excVal, .none]
+            | _ => [mgr, .none, .none, .none]
+          let result ← callValueDispatch fn exitArgs []
+          if ← isTruthy result then suppressed := true
+        | none => pure ()
+      | _ => pure ()
+    -- Re-raise body error if not suppressed
+    match bodyError with
+    | some sig => if !suppressed then throw sig
+    | none => pure ()
   | .import_ _aliases _ => throwNotImplemented "import statements"
   | .importFrom _ _aliases _ _ => throwNotImplemented "import-from statements"
 
@@ -1253,7 +1350,53 @@ partial def callStrMethod (s : String) (method : String) (args : List Value)
       let padding := String.ofList (List.replicate (w - s.length) '0')
       return .str (padding ++ s)
     | _ => throwTypeError "zfill() takes 1 argument"
-  | "format" => return .str s
+  | "format" => do
+    -- Python str.format(): supports {}, {0}, {1}, {{, }}
+    let chars := s.toList
+    let mut result : List Char := []
+    let mut i := 0
+    let mut autoIdx := 0
+    while i < chars.length do
+      let c := chars[i]!
+      if c == '{' then
+        if i + 1 < chars.length && chars[i + 1]! == '{' then
+          result := result ++ ['{']
+          i := i + 2
+        else
+          -- Find closing }
+          let mut j := i + 1
+          while j < chars.length && chars[j]! != '}' do j := j + 1
+          if j >= chars.length then
+            throwValueError "Single '{' encountered in format string"
+          let fieldContent := String.ofList (chars.drop (i + 1) |>.take (j - i - 1))
+          -- Strip format spec after ':'
+          let fieldName := match fieldContent.splitOn ":" with
+            | name :: _ => name
+            | [] => ""
+          let argVal ←
+            if fieldName.isEmpty then do
+              if autoIdx >= args.length then throwIndexError "Replacement index out of range for positional args tuple"
+              let v := args[autoIdx]!
+              autoIdx := autoIdx + 1
+              pure v
+            else match fieldName.toNat? with
+              | some idx =>
+                if idx >= args.length then throwIndexError s!"Replacement index {idx} out of range for positional args tuple"
+                pure args[idx]!
+              | none => throwKeyError s!"'{fieldName}'"
+          let valStr ← valueToStr argVal
+          result := result ++ valStr.toList
+          i := j + 1
+      else if c == '}' then
+        if i + 1 < chars.length && chars[i + 1]! == '}' then
+          result := result ++ ['}']
+          i := i + 2
+        else
+          throwValueError "Single '}' encountered in format string"
+      else
+        result := result ++ [c]
+        i := i + 1
+    return .str (String.ofList result)
   | "count" =>
     match args with
     | [.str sub] => return .int (stringCount s sub)

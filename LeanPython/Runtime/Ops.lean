@@ -209,6 +209,73 @@ partial def valueRepr (v : Value) : InterpM String :=
 end
 
 -- ============================================================
+-- String % formatting
+-- ============================================================
+
+/-- Python-style `%` string formatting. Supports %s, %d, %i, %f, %r, %x, %o, %%. -/
+partial def formatPercent (fmt : String) (args : Array Value) : InterpM String := do
+  let chars := fmt.toList
+  let mut result : List Char := []
+  let mut i := 0
+  let mut argIdx := 0
+  while i < chars.length do
+    let c := chars[i]!
+    if c == '%' then
+      if i + 1 < chars.length then
+        let spec := chars[i + 1]!
+        match spec with
+        | '%' => result := result ++ ['%']; i := i + 2
+        | 's' =>
+          if argIdx >= args.size then throwTypeError "not enough arguments for format string"
+          let s ← valueToStr args[argIdx]!
+          result := result ++ s.toList; argIdx := argIdx + 1; i := i + 2
+        | 'r' =>
+          if argIdx >= args.size then throwTypeError "not enough arguments for format string"
+          let s ← valueRepr args[argIdx]!
+          result := result ++ s.toList; argIdx := argIdx + 1; i := i + 2
+        | 'd' | 'i' =>
+          if argIdx >= args.size then throwTypeError "not enough arguments for format string"
+          let s := match args[argIdx]! with
+            | .int n => toString n
+            | .bool b => toString (if b then 1 else 0)
+            | .float f => toString f.toUInt64.toNat
+            | v => Value.toStr v
+          result := result ++ s.toList; argIdx := argIdx + 1; i := i + 2
+        | 'f' =>
+          if argIdx >= args.size then throwTypeError "not enough arguments for format string"
+          let s := match args[argIdx]! with
+            | .float f => toString f
+            | .int n => toString (Float.ofInt n)
+            | v => Value.toStr v
+          result := result ++ s.toList; argIdx := argIdx + 1; i := i + 2
+        | 'x' =>
+          if argIdx >= args.size then throwTypeError "not enough arguments for format string"
+          let s := match args[argIdx]! with
+            | .int n =>
+              let hexChars := Nat.toDigits 16 n.natAbs
+              let hexStr := if hexChars.isEmpty then "0" else String.ofList hexChars
+              if n < 0 then "-" ++ hexStr else hexStr
+            | v => Value.toStr v
+          result := result ++ s.toList; argIdx := argIdx + 1; i := i + 2
+        | 'o' =>
+          if argIdx >= args.size then throwTypeError "not enough arguments for format string"
+          let s := match args[argIdx]! with
+            | .int n =>
+              let octChars := Nat.toDigits 8 n.natAbs
+              let octStr := if octChars.isEmpty then "0" else String.ofList octChars
+              if n < 0 then "-" ++ octStr else octStr
+            | v => Value.toStr v
+          result := result ++ s.toList; argIdx := argIdx + 1; i := i + 2
+        | _ =>
+          -- Unknown specifier, pass through
+          result := result ++ ['%', spec]; i := i + 2
+      else
+        result := result ++ ['%']; i := i + 1
+    else
+      result := result ++ [c]; i := i + 1
+  return String.ofList result
+
+-- ============================================================
 -- Membership test (for `in` operator)
 -- ============================================================
 
@@ -335,9 +402,12 @@ partial def evalBinOp (op : BinOp) (left right : Value) : InterpM Value := do
     | .int a, .int b =>
       if b == 0 then throwZeroDivision "integer division or modulo by zero"
       else return .int (Int.fmod a b)
-    | .str fmt, _ => do
-      -- Basic % string formatting (stub)
-      return .str fmt
+    | .str fmt, right => do
+      let args := match right with
+        | .tuple arr => arr
+        | v => #[v]
+      let result ← formatPercent fmt args
+      return .str result
     | _, _ =>
       match toFloat left, toFloat right with
       | some a, some b =>
