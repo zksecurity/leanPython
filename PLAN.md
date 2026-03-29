@@ -767,7 +767,7 @@ For non-deterministic tests, structural equivalence is checked.
 |-------|-------------|--------|
 | 0 | Project scaffolding | Done |
 | 1 | Lexer | In progress |
-| 2 | Parser | Not started |
+| 2 | Parser | In progress |
 | 3 | Core interpreter (expressions, types) | Not started |
 | 4 | Control flow and functions | Not started |
 | 5 | Object model (classes, inheritance) | Not started |

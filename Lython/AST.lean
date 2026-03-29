@@ -1,4 +1,3 @@
-set_option autoImplicit false
+import Lython.AST.Types
 
-namespace Lython.AST
-end Lython.AST
+set_option autoImplicit false

@@ -24,14 +24,24 @@ Lython/
     StringLit.lean   — String/bytes/raw/f-string literal lexing
     Indent.lean      — INDENT/DEDENT generation from leading whitespace
     Core.lean        — Main tokenization loop, operator dispatch
-  Parser.lean        — PEG parser (stub)
-  AST.lean           — Python AST node types (stub)
+  AST.lean           — AST umbrella import
+  AST/
+    Types.lean       — Expr, Stmt, Module, and supporting types (mutual inductives)
+  Parser.lean        — parser umbrella import
+  Parser/
+    Types.lean       — ParseError, ParserState, ParserM monad
+    Combinators.lean — PEG combinators (attempt, many, sepBy, etc.)
+    Tokens.lean      — Token matching helpers (expectKeyword, parseName, etc.)
+    Expr.lean        — Expression parser (18 precedence levels)
+    Stmt.lean        — Statement parser (simple + compound statements)
+    Core.lean        — Entry point: parse : String → Except String Module
   Interpreter.lean   — tree-walking interpreter (stub)
   Runtime.lean       — runtime support (stub)
 Main.lean            — CLI entry point
 LythonTest.lean      — test driver root
 LythonTest/
   Basic.lean         — lexer tests (keywords, operators, numbers, strings, indent)
+  Parser.lean        — parser tests (expressions, statements, integration)
 ```
 
 ## Code Style
@@ -39,6 +49,9 @@ LythonTest/
 - `set_option autoImplicit false` at the top of every file
 - No trailing whitespace
 - Follow existing patterns in the codebase
+- Do NOT use `/-! ... -/` module doc comments inside `mutual` blocks (they are commands, not comments; use `-- ...` instead)
+- Use `partial def` for all recursive parser functions
+- Structures cannot be in `mutual` blocks; use `inductive Foo where | mk : ...` instead
 
 ## Development Plan
 
