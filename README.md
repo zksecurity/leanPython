@@ -4,7 +4,7 @@
 
 No theorem proving is involved yet. This is plain Lean4 code that happens to be written in a language with a proof assistant — we're not using that capability at this stage.
 
-Lython is a tree-walking Python 3.12 interpreter written in Lean4. The end goal is to interpret the [leanSpec](https://github.com/leanEthereum/leanSpec) Ethereum consensus specification, so that Python specs go in and Lean4-verified execution comes out. Right now it can run basic Python programs with arithmetic, control flow, functions, lists, dicts, comprehensions, and a handful of built-in functions.
+Lython is a tree-walking Python 3.12 interpreter written in Lean4. The end goal is to interpret the [leanSpec](https://github.com/leanEthereum/leanSpec) Ethereum consensus specification, making Python specs usable from within Lean4. Right now it can run basic Python programs with arithmetic, control flow, functions, lists, dicts, comprehensions, and a handful of built-in functions.
 
 ## Running hello world
 
