@@ -82,6 +82,35 @@ private def sliceIndices (start stop step : Int) : List Nat :=
       return result
 
 -- ============================================================
+-- Known method names per type (used to validate attribute access)
+-- ============================================================
+
+private def knownStrMethods : List String :=
+  ["upper", "lower", "strip", "lstrip", "rstrip", "split", "join", "replace",
+   "startswith", "endswith", "find", "removeprefix", "removesuffix",
+   "isdigit", "isalpha", "encode", "zfill", "format", "count"]
+
+private def knownListMethods : List String :=
+  ["append", "extend", "pop", "insert", "remove", "reverse", "clear",
+   "copy", "index", "count", "sort"]
+
+private def knownDictMethods : List String :=
+  ["get", "keys", "values", "items", "pop", "update", "clear", "copy", "setdefault"]
+
+private def knownSetMethods : List String :=
+  ["add", "remove", "discard", "clear", "copy", "union", "intersection",
+   "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"]
+
+private def knownIntMethods : List String :=
+  ["bit_length", "to_bytes"]
+
+private def knownBytesMethods : List String :=
+  ["hex", "decode"]
+
+private def knownTupleMethods : List String :=
+  ["count", "index"]
+
+-- ============================================================
 -- Mutual block: evalExpr, execStmt, and helpers
 -- ============================================================
 
@@ -263,14 +292,20 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     (kwargs : List (String × Value)) : InterpM Value := do
   match callee with
   | .builtin name => do
-    if name.startsWith "__list_method_" then return ← callListMethodByName name args
-    else if name.startsWith "__dict_method_" then return ← callDictMethodByName name args
-    else if name.startsWith "__str_method_" then return ← callStrMethodByName name args
-    else if name.startsWith "__set_method_" then return ← callSetMethodByName name args
-    else callBuiltin name args kwargs
+    -- Handle map/filter specially since they need callValueDispatch
+    match name with
+    | "map" => builtinMap args
+    | "filter" => builtinFilter args
+    | "hasattr" => builtinHasattr args
+    | "getattr" => builtinGetattr args
+    | _ => callBuiltin name args kwargs
   | .function ref => do
     let fd ← heapGetFunc ref
     callUserFunc fd args kwargs
+  | .boundMethod receiver method => callBoundMethod receiver method args
+  | .exception _ _ =>
+    -- Exception objects are not callable, but exception classes are handled as builtins
+    throwTypeError s!"'{typeName callee}' object is not callable"
   | _ => throwTypeError s!"'{typeName callee}' object is not callable"
 
 -- Call a user-defined function
@@ -395,10 +430,37 @@ partial def evalDictCompGen (generators : List Comprehension)
 -- Attribute access
 partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := do
   match obj with
-  | .str _ => return .builtin s!"__str_method_{attr}_{obj.toStr}"
-  | .list ref => return .builtin s!"__list_method_{attr}_{ref}"
-  | .dict ref => return .builtin s!"__dict_method_{attr}_{ref}"
-  | .set ref => return .builtin s!"__set_method_{attr}_{ref}"
+  | .str _ =>
+    if knownStrMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'str' object has no attribute '{attr}'"
+  | .list _ =>
+    if knownListMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'list' object has no attribute '{attr}'"
+  | .dict _ =>
+    if knownDictMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'dict' object has no attribute '{attr}'"
+  | .set _ =>
+    if knownSetMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'set' object has no attribute '{attr}'"
+  | .int _ =>
+    if knownIntMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'int' object has no attribute '{attr}'"
+  | .bytes _ =>
+    if knownBytesMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'bytes' object has no attribute '{attr}'"
+  | .tuple _ =>
+    if knownTupleMethods.contains attr then return .boundMethod obj attr
+    else throwAttributeError s!"'tuple' object has no attribute '{attr}'"
+  | .builtin name =>
+    -- Type methods like int.from_bytes, bytes.fromhex
+    match name, attr with
+    | "int", "from_bytes" => return .boundMethod obj attr
+    | "bytes", "fromhex" => return .boundMethod obj attr
+    | _, _ => throwAttributeError s!"type '{name}' has no attribute '{attr}'"
+  | .exception _ _ =>
+    match attr with
+    | "args" => return .str (Value.toStr obj)
+    | _ => throwAttributeError s!"'{typeName obj}' object has no attribute '{attr}'"
   | _ => throwAttributeError s!"'{typeName obj}' object has no attribute '{attr}'"
 
 -- Subscript access
@@ -639,8 +701,38 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
 
   | .raise_ exprOpt _cause _ => do
     match exprOpt with
-    | some e => throwRuntimeError (.runtimeError (← valueToStr (← evalExpr e)))
-    | none => throwRuntimeError (.runtimeError "re-raise without active exception")
+    | some e => do
+      let v ← evalExpr e
+      match v with
+      | .exception typeName msg =>
+        -- Map exception type to the appropriate RuntimeError variant
+        let err := match typeName with
+          | "ValueError" => RuntimeError.valueError msg
+          | "TypeError" => RuntimeError.typeError msg
+          | "KeyError" => RuntimeError.keyError msg
+          | "IndexError" => RuntimeError.indexError msg
+          | "NameError" => RuntimeError.nameError msg
+          | "ZeroDivisionError" => RuntimeError.zeroDivision msg
+          | "AssertionError" => RuntimeError.assertionError msg
+          | "AttributeError" => RuntimeError.attributeError msg
+          | "OverflowError" => RuntimeError.overflowError msg
+          | "StopIteration" => RuntimeError.stopIteration
+          | "NotImplementedError" => RuntimeError.notImplemented msg
+          | _ => RuntimeError.runtimeError msg
+        throwRuntimeError err
+      | .builtin name =>
+        -- raise ValueError (no args)
+        if isBuiltinName name then
+          throwRuntimeError (.runtimeError name)
+        else
+          throwTypeError "exceptions must derive from BaseException"
+      | _ => throwTypeError "exceptions must derive from BaseException"
+    | none => do
+      -- Bare raise: re-raise active exception
+      let st ← get
+      match st.activeException with
+      | some e => throwRuntimeError e
+      | none => throwRuntimeError (.runtimeError "No active exception to re-raise")
 
   | .try_ body handlers orelse finally_ _ => do
     let bodyResult ← do
@@ -651,20 +743,45 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | sig@(.error _) => pure (some sig)
       | other => throw other
     match bodyResult with
-    | none => execStmts orelse
+    | none => do
+      try execStmts orelse catch e => do execStmts finally_; throw e
+      execStmts finally_
     | some (.error e) => do
+      -- Save the active exception for bare `raise`
+      modify fun st => { st with activeException := some e }
+      let errorTypeName := runtimeErrorTypeName e
+      let errorMsg := runtimeErrorMessage e
       let mut handled := false
       for handler in handlers do
         match handler with
-        | .mk _type_ handlerName handlerBody _ => do
-          if let some n := handlerName then
-            setVariable n (.str (toString e))
-          execStmts handlerBody
-          handled := true
-          break
-      if !handled then throwRuntimeError e
-    | some other => throw other
-    execStmts finally_
+        | .mk type_ handlerName handlerBody _ => do
+          let doesMatch ← match type_ with
+            | none => pure true  -- bare `except:` catches everything
+            | some typeExpr => do
+              let typeVal ← evalExpr typeExpr
+              match typeVal with
+              | .builtin typN => pure (exceptionMatches errorTypeName typN)
+              | .tuple typeVals => do
+                -- except (TypeError, ValueError): ...
+                let mut found := false
+                for tv in typeVals do
+                  match tv with
+                  | .builtin typN =>
+                    if exceptionMatches errorTypeName typN then found := true; break
+                  | _ => pure ()
+                pure found
+              | _ => pure false
+          if doesMatch then
+            if let some n := handlerName then
+              setVariable n (.exception errorTypeName errorMsg)
+            try execStmts handlerBody catch exc => do execStmts finally_; throw exc
+            handled := true
+            break
+      if !handled then do execStmts finally_; throwRuntimeError e
+      else execStmts finally_
+      -- Clear active exception
+      modify fun st => { st with activeException := none }
+    | some other => do execStmts finally_; throw other
 
   | .with_ _items _body _ => throwNotImplemented "with statements"
   | .import_ _aliases _ => throwNotImplemented "import statements"
@@ -709,60 +826,199 @@ partial def deleteSubscriptValue (obj idx : Value) : InterpM Unit := do
 -- Method call helpers (called by callValueDispatch)
 -- ============================================================
 
-partial def callListMethodByName (encodedName : String) (args : List Value)
-    : InterpM Value := do
-  -- Encoded: __list_method_METHOD_REF
-  let rest := strDrop encodedName "__list_method_".length
-  -- Find last underscore to split method from ref
-  let parts := rest.toList
-  let revParts := parts.reverse
-  let refChars := revParts.takeWhile Char.isDigit |>.reverse
-  let methodChars := parts.take (parts.length - refChars.length - 1) -- -1 for separator _
-  let method := String.ofList methodChars
-  let refStr := String.ofList refChars
-  match refStr.toNat? with
-  | some ref => callListMethod ref method args
-  | none => throwNotImplemented s!"method {encodedName}"
+-- ============================================================
+-- Bound method dispatch
+-- ============================================================
 
-partial def callDictMethodByName (encodedName : String) (args : List Value)
+partial def callBoundMethod (receiver : Value) (method : String) (args : List Value)
     : InterpM Value := do
-  let rest := strDrop encodedName "__dict_method_".length
-  let parts := rest.toList
-  let revParts := parts.reverse
-  let refChars := revParts.takeWhile Char.isDigit |>.reverse
-  let methodChars := parts.take (parts.length - refChars.length - 1)
-  let method := String.ofList methodChars
-  let refStr := String.ofList refChars
-  match refStr.toNat? with
-  | some ref => callDictMethod ref method args
-  | none => throwNotImplemented s!"method {encodedName}"
+  match receiver with
+  | .list ref => callListMethod ref method args
+  | .dict ref => callDictMethod ref method args
+  | .str s => callStrMethod s method args
+  | .set ref => callSetMethod ref method args
+  | .int n => callIntMethod n method args
+  | .bytes b => callBytesMethod b method args
+  | .tuple arr => callTupleMethod arr method args
+  | .builtin name => callBuiltinTypeMethod name method args
+  | _ => throwAttributeError s!"'{typeName receiver}' object has no attribute '{method}'"
 
-partial def callStrMethodByName (encodedName : String) (args : List Value)
-    : InterpM Value := do
-  -- Encoded: __str_method_METHOD_ACTUALSTRING
-  -- Find the method name between first and second underscore groups
-  let rest := strDrop encodedName "__str_method_".length
-  -- Split on first _ to get method, rest is the string
-  match rest.toList.dropWhile (· != '_') with
-  | [] => throwNotImplemented s!"method {encodedName}"
-  | _ :: strChars =>
-    let methodChars := rest.toList.takeWhile (· != '_')
-    let method := String.ofList methodChars
-    let s := String.ofList strChars
-    callStrMethod s method args
+-- ============================================================
+-- map / filter (need callValueDispatch, so must be in mutual block)
+-- ============================================================
 
-partial def callSetMethodByName (encodedName : String) (args : List Value)
+partial def builtinMap (args : List Value) : InterpM Value := do
+  match args with
+  | [func, iter] => do
+    let items ← iterValues iter
+    let mut result : Array Value := #[]
+    for item in items do
+      let v ← callValueDispatch func [item] []
+      result := result.push v
+    allocList result
+  | _ => throwTypeError "map() requires at least two arguments"
+
+partial def builtinFilter (args : List Value) : InterpM Value := do
+  match args with
+  | [func, iter] => do
+    let items ← iterValues iter
+    let mut result : Array Value := #[]
+    for item in items do
+      let keep ← match func with
+        | .none => isTruthy item
+        | _ => do isTruthy (← callValueDispatch func [item] [])
+      if keep then result := result.push item
+    allocList result
+  | _ => throwTypeError "filter() requires exactly two arguments"
+
+-- ============================================================
+-- hasattr / getattr (need getAttributeValue, so must be in mutual block)
+-- ============================================================
+
+partial def builtinHasattr (args : List Value) : InterpM Value := do
+  match args with
+  | [obj, .str name] => do
+    try
+      let _ ← getAttributeValue obj name
+      return .bool true
+    catch
+    | .error (.attributeError _) => return .bool false
+    | other => throw other
+  | _ => throwTypeError "hasattr() takes 2 arguments"
+
+partial def builtinGetattr (args : List Value) : InterpM Value := do
+  match args with
+  | [obj, .str name] => getAttributeValue obj name
+  | [obj, .str name, default_] => do
+    try
+      getAttributeValue obj name
+    catch
+    | .error (.attributeError _) => return default_
+    | other => throw other
+  | _ => throwTypeError "getattr() takes 2 or 3 arguments"
+
+-- ============================================================
+-- Int methods
+-- ============================================================
+
+partial def callIntMethod (n : Int) (method : String) (args : List Value)
     : InterpM Value := do
-  let rest := strDrop encodedName "__set_method_".length
-  let parts := rest.toList
-  let revParts := parts.reverse
-  let refChars := revParts.takeWhile Char.isDigit |>.reverse
-  let methodChars := parts.take (parts.length - refChars.length - 1)
-  let method := String.ofList methodChars
-  let refStr := String.ofList refChars
-  match refStr.toNat? with
-  | some ref => callSetMethod ref method args
-  | none => throwNotImplemented s!"method {encodedName}"
+  match method with
+  | "bit_length" =>
+    match args with
+    | [] =>
+      if n == 0 then return .int 0
+      else return .int (Nat.log2 n.natAbs + 1)
+    | _ => throwTypeError "bit_length() takes no arguments"
+  | "to_bytes" =>
+    match args with
+    | [.int length, .str byteorder] => intToBytes n length.toNat byteorder
+    | _ => throwTypeError "to_bytes() takes length and byteorder arguments"
+  | _ => throwAttributeError s!"'int' object has no attribute '{method}'"
+where
+  intToBytes (n : Int) (length : Nat) (byteorder : String) : InterpM Value := do
+    let val := n.natAbs
+    let mut result := ByteArray.empty
+    for _ in [:length] do result := result.push 0
+    let mut v := val
+    for i in [:length] do
+      let byteIdx := if byteorder == "big" then length - 1 - i else i
+      result := result.set! byteIdx (v % 256).toUInt8
+      v := v / 256
+    return .bytes result
+
+-- ============================================================
+-- Bytes methods
+-- ============================================================
+
+partial def callBytesMethod (b : ByteArray) (method : String) (args : List Value)
+    : InterpM Value := do
+  match method with
+  | "hex" =>
+    match args with
+    | [] => do
+      let mut result := ""
+      for byte in b.toList do
+        let hi := byte.toNat / 16
+        let lo := byte.toNat % 16
+        let hexDigit (n : Nat) : Char := if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
+        result := result ++ String.ofList [hexDigit hi, hexDigit lo]
+      return .str result
+    | _ => throwTypeError "hex() takes no arguments"
+  | "decode" =>
+    match args with
+    | [] => return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
+    | [.str _encoding] => return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
+    | _ => throwTypeError "decode() takes at most 1 argument"
+  | _ => throwAttributeError s!"'bytes' object has no attribute '{method}'"
+
+-- ============================================================
+-- Tuple methods
+-- ============================================================
+
+partial def callTupleMethod (arr : Array Value) (method : String) (args : List Value)
+    : InterpM Value := do
+  match method with
+  | "count" =>
+    match args with
+    | [v] => do
+      let mut count : Nat := 0
+      for elem in arr do
+        if ← valueEq elem v then count := count + 1
+      return .int count
+    | _ => throwTypeError "count() takes exactly one argument"
+  | "index" =>
+    match args with
+    | [v] => do
+      for i in [:arr.size] do
+        if ← valueEq arr[i]! v then return .int i
+      throwValueError "tuple.index(x): x not in tuple"
+    | _ => throwTypeError "index() takes 1 argument"
+  | _ => throwAttributeError s!"'tuple' object has no attribute '{method}'"
+
+-- ============================================================
+-- Builtin type methods (int.from_bytes, bytes.fromhex, etc.)
+-- ============================================================
+
+partial def callBuiltinTypeMethod (typeName_ : String) (method : String) (args : List Value)
+    : InterpM Value := do
+  match typeName_, method with
+  | "int", "from_bytes" =>
+    match args with
+    | [.bytes data, .str byteorder] => do
+      let mut result : Nat := 0
+      if byteorder == "big" then
+        for byte in data.toList do
+          result := result * 256 + byte.toNat
+      else
+        let mut shift : Nat := 0
+        for byte in data.toList do
+          result := result + byte.toNat * (256 ^ shift)
+          shift := shift + 1
+      return .int result
+    | _ => throwTypeError "int.from_bytes() takes bytes and byteorder arguments"
+  | "bytes", "fromhex" =>
+    match args with
+    | [.str hexStr] => do
+      let chars := hexStr.toList.filter (· != ' ')
+      if chars.length % 2 != 0 then
+        throwValueError "non-hexadecimal number found in fromhex() arg"
+      let mut result := ByteArray.empty
+      let mut i : Nat := 0
+      while i + 1 < chars.length do
+        let hi ← hexCharToNat chars[i]!
+        let lo ← hexCharToNat chars[i + 1]!
+        result := result.push (hi * 16 + lo).toUInt8
+        i := i + 2
+      return .bytes result
+    | _ => throwTypeError "fromhex() takes exactly 1 argument"
+  | _, _ => throwAttributeError s!"type '{typeName_}' has no attribute '{method}'"
+where
+  hexCharToNat (c : Char) : InterpM Nat := do
+    if '0' ≤ c && c ≤ '9' then return c.toNat - '0'.toNat
+    else if 'a' ≤ c && c ≤ 'f' then return c.toNat - 'a'.toNat + 10
+    else if 'A' ≤ c && c ≤ 'F' then return c.toNat - 'A'.toNat + 10
+    else throwValueError s!"non-hexadecimal number found in fromhex() arg"
 
 -- List methods
 partial def callListMethod (ref : HeapRef) (method : String) (args : List Value)
@@ -831,7 +1087,23 @@ partial def callListMethod (ref : HeapRef) (method : String) (args : List Value)
         if ← valueEq elem v then count := count + 1
       return .int count
     | _ => throwTypeError "count() takes exactly one argument"
-  | _ => throwNotImplemented s!"list.{method}()"
+  | "sort" => do
+    let arr ← heapGetList ref
+    let sorted ← listInsertionSort arr.toList
+    heapSetList ref sorted.toArray; return .none
+  | _ => throwAttributeError s!"'list' object has no attribute '{method}'"
+where
+  listInsertionSort (xs : List Value) : InterpM (List Value) := do
+    let mut result : List Value := []
+    for x in xs do
+      result ← listInsertOne x result
+    return result
+  listInsertOne (x : Value) (sorted : List Value) : InterpM (List Value) := do
+    match sorted with
+    | [] => return [x]
+    | y :: ys =>
+      if ← evalCmpOp .ltE x y then return x :: y :: ys
+      else return y :: (← listInsertOne x ys)
 
 -- Dict methods
 partial def callDictMethod (ref : HeapRef) (method : String) (args : List Value)
@@ -894,7 +1166,22 @@ partial def callDictMethod (ref : HeapRef) (method : String) (args : List Value)
     | _ => throwTypeError "update() takes 1 argument"
   | "clear" => do heapSetDict ref #[]; return .none
   | "copy" => do allocDict (← heapGetDict ref)
-  | _ => throwNotImplemented s!"dict.{method}()"
+  | "setdefault" =>
+    match args with
+    | [key] => do
+      let pairs ← heapGetDict ref
+      for (k, v) in pairs do
+        if ← valueEq k key then return v
+      let newPairs := pairs.push (key, .none)
+      heapSetDict ref newPairs; return .none
+    | [key, default_] => do
+      let pairs ← heapGetDict ref
+      for (k, v) in pairs do
+        if ← valueEq k key then return v
+      let newPairs := pairs.push (key, default_)
+      heapSetDict ref newPairs; return default_
+    | _ => throwTypeError "setdefault() takes 1 or 2 arguments"
+  | _ => throwAttributeError s!"'dict' object has no attribute '{method}'"
 
 -- String methods
 partial def callStrMethod (s : String) (method : String) (args : List Value)
@@ -971,7 +1258,13 @@ partial def callStrMethod (s : String) (method : String) (args : List Value)
     match args with
     | [.str sub] => return .int (stringCount s sub)
     | _ => throwTypeError "count() takes 1 argument"
-  | _ => throwNotImplemented s!"str.{method}()"
+  | "lstrip" =>
+    let chars := s.toList.dropWhile Char.isWhitespace
+    return .str (String.ofList chars)
+  | "rstrip" =>
+    let chars := s.toList.reverse.dropWhile Char.isWhitespace |>.reverse
+    return .str (String.ofList chars)
+  | _ => throwAttributeError s!"'str' object has no attribute '{method}'"
 where
   stringFind (haystack sub : String) : Int :=
     let hLen := haystack.length
@@ -1070,7 +1363,98 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     | _ => throwTypeError "discard() takes exactly one argument"
   | "clear" => do heapSetSet ref #[]; return .none
   | "copy" => do allocSet (← heapGetSet ref)
-  | _ => throwNotImplemented s!"set.{method}()"
+  | "union" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      let mut result := a
+      for elem in b do
+        let mut found := false
+        for existing in result do
+          if ← valueEq existing elem then found := true; break
+        if !found then result := result.push elem
+      allocSet result
+    | _ => throwTypeError "union() takes exactly one argument"
+  | "intersection" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      let mut result : Array Value := #[]
+      for elem in a do
+        let mut found := false
+        for otherElem in b do
+          if ← valueEq elem otherElem then found := true; break
+        if found then result := result.push elem
+      allocSet result
+    | _ => throwTypeError "intersection() takes exactly one argument"
+  | "difference" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      let mut result : Array Value := #[]
+      for elem in a do
+        let mut found := false
+        for otherElem in b do
+          if ← valueEq elem otherElem then found := true; break
+        if !found then result := result.push elem
+      allocSet result
+    | _ => throwTypeError "difference() takes exactly one argument"
+  | "symmetric_difference" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      let mut result : Array Value := #[]
+      for elem in a do
+        let mut found := false
+        for otherElem in b do
+          if ← valueEq elem otherElem then found := true; break
+        if !found then result := result.push elem
+      for elem in b do
+        let mut found := false
+        for otherElem in a do
+          if ← valueEq elem otherElem then found := true; break
+        if !found then result := result.push elem
+      allocSet result
+    | _ => throwTypeError "symmetric_difference() takes exactly one argument"
+  | "issubset" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      for elem in a do
+        let mut found := false
+        for otherElem in b do
+          if ← valueEq elem otherElem then found := true; break
+        if !found then return .bool false
+      return .bool true
+    | _ => throwTypeError "issubset() takes exactly one argument"
+  | "issuperset" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      for elem in b do
+        let mut found := false
+        for otherElem in a do
+          if ← valueEq elem otherElem then found := true; break
+        if !found then return .bool false
+      return .bool true
+    | _ => throwTypeError "issuperset() takes exactly one argument"
+  | "isdisjoint" =>
+    match args with
+    | [other] => do
+      let a ← heapGetSet ref
+      let b ← iterValues other
+      for elem in a do
+        for otherElem in b do
+          if ← valueEq elem otherElem then return .bool false
+      return .bool true
+    | _ => throwTypeError "isdisjoint() takes exactly one argument"
+  | _ => throwAttributeError s!"'set' object has no attribute '{method}'"
 
 end
 

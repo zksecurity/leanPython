@@ -32,9 +32,11 @@ inductive Value where
   | tuple     : Array Value → Value
   | dict      : HeapRef → Value
   | set       : HeapRef → Value
-  | function  : HeapRef → Value
-  | builtin   : String → Value
+  | function    : HeapRef → Value
+  | builtin     : String → Value
   | ellipsis
+  | boundMethod : Value → String → Value
+  | exception   : String → String → Value
 
 instance : Inhabited Value where
   default := .none
@@ -132,6 +134,9 @@ partial def Value.beq : Value → Value → Bool
   | .function a, .function b => a == b
   | .builtin a, .builtin b => a == b
   | .ellipsis, .ellipsis => true
+  | .boundMethod _ _, _ => false
+  | _, .boundMethod _ _ => false
+  | .exception a1 a2, .exception b1 b2 => a1 == b1 && a2 == b2
   -- Cross-type: bool/int interop (Python: True == 1, False == 0)
   | .bool a, .int b => (if a then 1 else 0) == b
   | .int a, .bool b => a == (if b then 1 else 0)
@@ -172,6 +177,8 @@ partial def Value.toStr : Value → String
   | .function _ => "<function>"
   | .builtin name => s!"<built-in function {name}>"
   | .ellipsis => "Ellipsis"
+  | .boundMethod _ method => s!"<bound method {method}>"
+  | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
 
 /-- Convert a Value to its Python `repr()` representation. -/
 partial def Value.toRepr : Value → String
@@ -193,9 +200,50 @@ partial def Value.toRepr : Value → String
   | .function _ => "<function>"
   | .builtin name => s!"<built-in function {name}>"
   | .ellipsis => "Ellipsis"
+  | .boundMethod _ method => s!"<bound method {method}>"
+  | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
 
 instance : ToString Value where
   toString := Value.toStr
+
+-- ============================================================
+-- Exception type name mapping
+-- ============================================================
+
+/-- Get the Python exception class name for a RuntimeError. -/
+def runtimeErrorTypeName : RuntimeError → String
+  | .nameError _      => "NameError"
+  | .typeError _      => "TypeError"
+  | .valueError _     => "ValueError"
+  | .indexError _     => "IndexError"
+  | .keyError _       => "KeyError"
+  | .zeroDivision _   => "ZeroDivisionError"
+  | .assertionError _ => "AssertionError"
+  | .attributeError _ => "AttributeError"
+  | .overflowError _  => "OverflowError"
+  | .stopIteration    => "StopIteration"
+  | .notImplemented _ => "NotImplementedError"
+  | .runtimeError _   => "RuntimeError"
+
+/-- Get the message portion of a RuntimeError. -/
+def runtimeErrorMessage : RuntimeError → String
+  | .nameError s | .typeError s | .valueError s | .indexError s
+  | .keyError s | .zeroDivision s | .assertionError s
+  | .attributeError s | .overflowError s | .notImplemented s
+  | .runtimeError s => s
+  | .stopIteration => ""
+
+/-- Check if an exception type matches a handler type, respecting the hierarchy.
+    `Exception` catches all standard errors, `BaseException` catches everything. -/
+def exceptionMatches (errorTypeName handlerTypeName : String) : Bool :=
+  if handlerTypeName == "BaseException" then true
+  else if handlerTypeName == "Exception" then
+    -- Exception catches everything except BaseException-only subtypes
+    -- (KeyboardInterrupt, SystemExit, GeneratorExit)
+    -- For now, all our errors are Exception subclasses
+    true
+  else
+    errorTypeName == handlerTypeName
 
 -- ============================================================
 -- Builtin name table
@@ -209,7 +257,13 @@ def builtinNames : List String :=
    "sum", "any", "all", "hash", "id", "input", "ord", "chr",
    "hex", "oct", "bin", "round", "pow", "divmod", "map", "filter",
    "iter", "next", "hasattr", "getattr", "setattr", "callable",
-   "issubclass", "super", "object"]
+   "issubclass", "super", "object", "bytes",
+   -- Exception classes
+   "ValueError", "TypeError", "KeyError", "IndexError",
+   "RuntimeError", "ZeroDivisionError", "AssertionError",
+   "AttributeError", "OverflowError", "StopIteration",
+   "NotImplementedError", "Exception", "BaseException",
+   "NameError", "OSError", "IOError", "FileNotFoundError"]
 
 /-- Check if a name is a built-in function. -/
 def isBuiltinName (name : String) : Bool :=

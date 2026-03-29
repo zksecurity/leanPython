@@ -356,6 +356,7 @@ def builtinCallable (args : List Value) : InterpM Value := do
   | [v] => return .bool (match v with
     | .function _ => true
     | .builtin _ => true
+    | .boundMethod _ _ => true
     | _ => false)
   | _ => throwTypeError "callable() takes exactly one argument"
 
@@ -435,6 +436,40 @@ partial def callBuiltin (name : String) (args : List Value)
     | [.int n] => return .int n
     | [.float f] => return .int (Float.round f).toUInt64.toNat
     | _ => throwTypeError "round() takes 1 argument"
+  | "bytes" => do
+    match args with
+    | [] => return .bytes ByteArray.empty
+    | [.int n] =>
+      if n < 0 then throwValueError "negative count"
+      else
+        let mut ba := ByteArray.empty
+        for _ in [:n.toNat] do ba := ba.push 0
+        return .bytes ba
+    | [.bytes b] => return .bytes b
+    | [v] => do
+      let items ← iterValues v
+      let mut result := ByteArray.empty
+      for item in items do
+        match item with
+        | .int n =>
+          if n < 0 || n > 255 then throwValueError "bytes must be in range(0, 256)"
+          else result := result.push n.toNat.toUInt8
+        | _ => throwTypeError "cannot convert to bytes"
+      return .bytes result
+    | _ => throwTypeError "bytes() takes at most 1 argument"
+  -- Exception constructors
+  | "ValueError" | "TypeError" | "KeyError" | "IndexError"
+  | "RuntimeError" | "ZeroDivisionError" | "AssertionError"
+  | "AttributeError" | "OverflowError" | "StopIteration"
+  | "NotImplementedError" | "Exception" | "BaseException"
+  | "NameError" | "OSError" | "IOError" | "FileNotFoundError" => do
+    let msg ← match args with
+      | [] => pure ""
+      | [v] => valueToStr v
+      | _ => do
+        let strs ← args.mapM valueToStr
+        pure (", ".intercalate strs)
+    return .exception name msg
   | _ => throwNotImplemented s!"builtin '{name}' is not implemented"
 
 end LeanPython.Runtime.Builtins

@@ -37,24 +37,26 @@ instance : ToString Signal where
 
 /-- The mutable state carried by the interpreter. -/
 structure InterpreterState where
-  globalScope   : Scope
-  localScopes   : List Scope
-  globalDecls   : List (Std.HashSet String)
-  nonlocalDecls : List (Std.HashSet String)
-  heap          : Std.HashMap Nat HeapObject
-  nextRef       : Nat
-  output        : List String
+  globalScope     : Scope
+  localScopes     : List Scope
+  globalDecls     : List (Std.HashSet String)
+  nonlocalDecls   : List (Std.HashSet String)
+  heap            : Std.HashMap Nat HeapObject
+  nextRef         : Nat
+  output          : List String
+  activeException : Option RuntimeError
   deriving Inhabited
 
 /-- Create a fresh interpreter state. -/
 def InterpreterState.initial : InterpreterState :=
-  { globalScope   := {}
-    localScopes   := []
-    globalDecls   := []
-    nonlocalDecls := []
-    heap          := {}
-    nextRef       := 0
-    output        := [] }
+  { globalScope     := {}
+    localScopes     := []
+    globalDecls     := []
+    nonlocalDecls   := []
+    heap            := {}
+    nextRef         := 0
+    output          := []
+    activeException := none }
 
 -- ============================================================
 -- Interpreter monad
@@ -317,5 +319,7 @@ def typeName : Value → String
   | .function _ => "function"
   | .builtin _ => "builtin_function_or_method"
   | .ellipsis => "ellipsis"
+  | .boundMethod _ _ => "method"
+  | .exception tn _ => tn
 
 end LeanPython.Interpreter

@@ -224,3 +224,97 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 -- ============================================================
 
 #eval assertPy "x = 5\nprint(\"big\" if x > 3 else \"small\")\n" "big\n"
+
+-- ============================================================
+-- Exception handling: raise and typed except
+-- ============================================================
+
+#eval assertPy "try:\n    raise ValueError(\"bad\")\nexcept ValueError as e:\n    print(\"caught\")\n" "caught\n"
+
+#eval assertPy "try:\n    raise TypeError(\"oops\")\nexcept ValueError:\n    print(\"wrong\")\nexcept TypeError:\n    print(\"right\")\n" "right\n"
+
+-- Exception catches TypeError via hierarchy
+#eval assertPy "try:\n    raise TypeError(\"oops\")\nexcept Exception:\n    print(\"caught\")\n" "caught\n"
+
+-- Bare except catches everything
+#eval assertPy "try:\n    raise ValueError(\"x\")\nexcept:\n    print(\"caught\")\n" "caught\n"
+
+-- Exception as binding gives exception value
+#eval assertPy "try:\n    raise ValueError(\"bad value\")\nexcept ValueError as e:\n    print(e)\n" "ValueError(bad value)\n"
+
+-- Finally always runs
+#eval assertPy "try:\n    raise ValueError(\"x\")\nexcept ValueError:\n    print(\"caught\")\nfinally:\n    print(\"done\")\n" "caught\ndone\n"
+
+-- ============================================================
+-- int methods
+-- ============================================================
+
+#eval assertPy "print((42).bit_length())\n" "6\n"
+#eval assertPy "print((0).bit_length())\n" "0\n"
+#eval assertPy "print((255).bit_length())\n" "8\n"
+
+-- int.to_bytes
+#eval assertPy "b = (256).to_bytes(2, \"big\")\nprint(b.hex())\n" "0100\n"
+#eval assertPy "b = (1).to_bytes(2, \"big\")\nprint(b.hex())\n" "0001\n"
+
+-- int.from_bytes
+#eval assertPy "print(int.from_bytes(b\"\\x00\\x01\", \"big\"))\n" "1\n"
+#eval assertPy "print(int.from_bytes(b\"\\x01\\x00\", \"little\"))\n" "1\n"
+
+-- ============================================================
+-- bytes methods
+-- ============================================================
+
+#eval assertPy "print(b\"\\xde\\xad\".hex())\n" "dead\n"
+#eval assertPy "print(b\"\\x00\\xff\".hex())\n" "00ff\n"
+
+-- bytes.fromhex
+#eval assertPy "b = bytes.fromhex(\"dead\")\nprint(b.hex())\n" "dead\n"
+
+-- bytes concatenation
+#eval assertPy "print((b\"\\x01\" + b\"\\x02\").hex())\n" "0102\n"
+
+-- ============================================================
+-- tuple methods
+-- ============================================================
+
+#eval assertPy "print((1, 2, 3, 2).count(2))\n" "2\n"
+#eval assertPy "print((1, 2, 3).index(2))\n" "1\n"
+
+-- ============================================================
+-- map and filter
+-- ============================================================
+
+#eval assertPy "print(list(map(lambda x: x * 2, [1, 2, 3])))\n" "[2, 4, 6]\n"
+#eval assertPy "print(list(filter(lambda x: x > 2, [1, 2, 3, 4])))\n" "[3, 4]\n"
+#eval assertPy "print(list(filter(None, [0, 1, \"\", \"a\", False, True])))\n" "[1, 'a', True]\n"
+
+-- ============================================================
+-- Set operations
+-- ============================================================
+
+#eval assertPy "print(sorted(list({1, 2, 3} - {2})))\n" "[1, 3]\n"
+#eval assertPy "print(sorted(list({1, 2, 3} & {2, 3, 4})))\n" "[2, 3]\n"
+#eval assertPy "print(sorted(list({1, 2, 3} ^ {2, 3, 4})))\n" "[1, 4]\n"
+
+-- ============================================================
+-- Dict merge
+-- ============================================================
+
+#eval assertPy "d = {1: 2} | {3: 4}\nprint(d[1])\nprint(d[3])\n" "2\n4\n"
+
+-- ============================================================
+-- hasattr / getattr
+-- ============================================================
+
+#eval assertPy "print(hasattr(\"hello\", \"upper\"))\n" "True\n"
+#eval assertPy "print(hasattr(42, \"nonexistent\"))\n" "False\n"
+#eval assertPy "print(getattr(\"hello\", \"nonexistent\", \"default\"))\n" "default\n"
+
+-- ============================================================
+-- String methods on strings with underscores (regression test)
+-- ============================================================
+
+#eval assertPy "print(\"hello_world\".upper())\n" "HELLO_WORLD\n"
+#eval assertPy "print(\"a_b_c\".split(\"_\"))\n" "['a', 'b', 'c']\n"
+#eval assertPy "print(\"test_string\".startswith(\"test\"))\n" "True\n"

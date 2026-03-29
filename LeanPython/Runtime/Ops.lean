@@ -87,6 +87,8 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .ellipsis => return true
   | .function _ => return true
   | .builtin _ => return true
+  | .boundMethod _ _ => return true
+  | .exception _ _ => return true
 
 -- ============================================================
 -- Deep equality (for == operator)
@@ -102,6 +104,7 @@ partial def valueEq (a b : Value) : InterpM Bool :=
   | .str a, .str b => return (a == b)
   | .bytes a, .bytes b => return (a == b)
   | .ellipsis, .ellipsis => return true
+  | .exception a1 a2, .exception b1 b2 => return (a1 == b1 && a2 == b2)
   -- Cross-type numeric equality
   | .bool a, .int b => return ((if a then 1 else 0) == b)
   | .int a, .bool b => return (a == (if b then 1 else 0))
@@ -164,6 +167,10 @@ partial def valueToStr (v : Value) : InterpM String :=
     let fd ← heapGetFunc ref
     return s!"<function {fd.name}>"
   | .builtin name => return s!"<built-in function {name}>"
+  | .boundMethod _ method => return s!"<bound method {method}>"
+  | .exception typeName msg =>
+    if msg.isEmpty then return typeName
+    else return s!"{typeName}({msg})"
   | .tuple elems => do
     let strs ← elems.toList.mapM valueRepr
     if elems.size == 1 then
@@ -189,6 +196,14 @@ partial def valueToStr (v : Value) : InterpM String :=
 partial def valueRepr (v : Value) : InterpM String :=
   match v with
   | .str s => return s!"'{s}'"
+  | .bytes b => do
+    let mut result := "b'"
+    for byte in b.toList do
+      let hi := byte.toNat / 16
+      let lo := byte.toNat % 16
+      let hexDigit (n : Nat) : Char := if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
+      result := result ++ s!"\\x{String.ofList [hexDigit hi, hexDigit lo]}"
+    return result ++ "'"
   | other => valueToStr other
 
 end
@@ -258,6 +273,7 @@ partial def evalBinOp (op : BinOp) (left right : Value) : InterpM Value := do
       let b ← heapGetList rb
       allocList (a ++ b)
     | .tuple a, .tuple b => return .tuple (a ++ b)
+    | .bytes a, .bytes b => return .bytes (a ++ b)
     | _, _ =>
       match toFloat left, toFloat right with
       | some a, some b => return .float (a + b)
@@ -265,6 +281,16 @@ partial def evalBinOp (op : BinOp) (left right : Value) : InterpM Value := do
   | .sub =>
     match left, right with
     | .int a, .int b => return .int (a - b)
+    | .set ra, .set rb => do
+      let a ← heapGetSet ra
+      let b ← heapGetSet rb
+      let mut result : Array Value := #[]
+      for elem in a do
+        let mut found := false
+        for other in b do
+          if ← valueEq elem other then found := true; break
+        if !found then result := result.push elem
+      allocSet result
     | _, _ =>
       match toFloat left, toFloat right with
       | some a, some b => return .float (a - b)
@@ -361,15 +387,57 @@ partial def evalBinOp (op : BinOp) (left right : Value) : InterpM Value := do
             if ← valueEq existing elem then found := true; break
           if !found then result := result.push elem
         allocSet result
+      | .dict ra, .dict rb => do
+        let a ← heapGetDict ra
+        let b ← heapGetDict rb
+        let mut result := a
+        for (k, v) in b do
+          let mut found := false
+          for i in [:result.size] do
+            if ← valueEq result[i]!.1 k then
+              result := result.set! i (k, v); found := true; break
+          if !found then result := result.push (k, v)
+        allocDict result
       | _, _ => throwTypeError s!"unsupported operand type(s) for |: '{typeName left}' and '{typeName right}'"
   | .bitAnd =>
     match toInt left, toInt right with
     | some a, some b => return .int (intBitAnd a b)
-    | _, _ => throwTypeError s!"unsupported operand type(s) for &: '{typeName left}' and '{typeName right}'"
+    | _, _ =>
+      match left, right with
+      | .set ra, .set rb => do
+        let a ← heapGetSet ra
+        let b ← heapGetSet rb
+        let mut result : Array Value := #[]
+        for elem in a do
+          let mut found := false
+          for other in b do
+            if ← valueEq elem other then found := true; break
+          if found then result := result.push elem
+        allocSet result
+      | _, _ => throwTypeError s!"unsupported operand type(s) for &: '{typeName left}' and '{typeName right}'"
   | .bitXor =>
     match toInt left, toInt right with
     | some a, some b => return .int (intBitXor a b)
-    | _, _ => throwTypeError s!"unsupported operand type(s) for ^: '{typeName left}' and '{typeName right}'"
+    | _, _ =>
+      match left, right with
+      | .set ra, .set rb => do
+        let a ← heapGetSet ra
+        let b ← heapGetSet rb
+        -- Elements in a but not in b
+        let mut result : Array Value := #[]
+        for elem in a do
+          let mut found := false
+          for other in b do
+            if ← valueEq elem other then found := true; break
+          if !found then result := result.push elem
+        -- Elements in b but not in a
+        for elem in b do
+          let mut found := false
+          for other in a do
+            if ← valueEq elem other then found := true; break
+          if !found then result := result.push elem
+        allocSet result
+      | _, _ => throwTypeError s!"unsupported operand type(s) for ^: '{typeName left}' and '{typeName right}'"
   | .matMult =>
     throwTypeError s!"unsupported operand type(s) for @: '{typeName left}' and '{typeName right}'"
 
@@ -415,6 +483,7 @@ private def isIdentical : Value → Value → Bool
   | .dict a, .dict b => a == b
   | .set a, .set b => a == b
   | .function a, .function b => a == b
+  | .builtin a, .builtin b => a == b
   | .ellipsis, .ellipsis => true
   | _, _ => false
 
@@ -498,6 +567,8 @@ partial def iterValues (v : Value) : InterpM (Array Value) :=
     return (pairs.map Prod.fst)
   | .set ref => heapGetSet ref
   | .bytes b => return (b.toList.map (fun byte => Value.int byte.toNat)).toArray
+  | .boundMethod _ _ => throwTypeError s!"'{typeName v}' object is not iterable"
+  | .exception _ _ => throwTypeError s!"'{typeName v}' object is not iterable"
   | _ => throwTypeError s!"'{typeName v}' object is not iterable"
 
 end LeanPython.Runtime.Ops
