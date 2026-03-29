@@ -1,0 +1,3 @@
+[submodule "references/cpython"]
+	path = references/cpython
+	url = https://github.com/python/cpython.git
