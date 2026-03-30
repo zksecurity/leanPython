@@ -658,3 +658,37 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- __hash__ for frozen models
 #eval assertPy "from pydantic import BaseModel, ConfigDict\nclass Frozen(BaseModel):\n    model_config = ConfigDict(frozen=True)\n    x: int\nf = Frozen(x=5)\nprint(type(hash(f)))" "<class 'int'>\n"
+
+-- ============================================================
+-- pydantic Phase 8b: validators, serializers, core_schema
+-- ============================================================
+
+-- field_validator(mode="before") transforms input
+#eval assertPy "from pydantic import BaseModel, field_validator\nclass Doubled(BaseModel):\n    x: int\n    @field_validator('x', mode='before')\n    @classmethod\n    def double_x(cls, v):\n        return v * 2\nd = Doubled(x=5)\nprint(d.x)" "10\n"
+
+-- model_validator(mode="after") validates constructed instance
+#eval assertPy "from pydantic import BaseModel, model_validator\nclass Checked(BaseModel):\n    x: int\n    @model_validator(mode='after')\n    def check(self):\n        return self\nc = Checked(x=5)\nprint(c.x)" "5\n"
+
+-- model_validator(mode="before") transforms input dict
+#eval assertPy "from pydantic import BaseModel, model_validator\nclass Swapped(BaseModel):\n    a: int\n    b: int\n    @model_validator(mode='before')\n    @classmethod\n    def swap(cls, data):\n        tmp = data['a']\n        data['a'] = data['b']\n        data['b'] = tmp\n        return data\ns = Swapped(a=1, b=2)\nprint(s.a)\nprint(s.b)" "2\n1\n"
+
+-- field_serializer with model_dump(mode="json")
+#eval assertPy "from pydantic import BaseModel, field_serializer\nclass Hex(BaseModel):\n    v: int\n    @field_serializer('v', when_used='json')\n    def hex_v(self, v, _info):\n        return hex(v)\nh = Hex(v=255)\nd = h.model_dump(mode='json')\nprint(d['v'])" "0xff\n"
+
+-- model_dump without mode="json" does not apply field_serializer
+#eval assertPy "from pydantic import BaseModel, field_serializer\nclass Hex(BaseModel):\n    v: int\n    @field_serializer('v', when_used='json')\n    def hex_v(self, v, _info):\n        return hex(v)\nh = Hex(v=255)\nd = h.model_dump()\nprint(d['v'])" "255\n"
+
+-- pydantic_core.core_schema module import
+#eval assertPy "from pydantic_core import core_schema\nprint(type(core_schema))" "<class 'module'>\n"
+
+-- core_schema.int_schema returns dict with type
+#eval assertPy "from pydantic_core import core_schema\ns = core_schema.int_schema(ge=0, lt=256)\nprint(s['type'])\nprint(s['ge'])\nprint(s['lt'])" "int\n0\n256\n"
+
+-- core_schema.union_schema returns dict
+#eval assertPy "from pydantic_core import core_schema\ns = core_schema.union_schema([core_schema.int_schema()])\nprint(s['type'])" "union\n"
+
+-- core_schema.is_instance_schema returns dict
+#eval assertPy "from pydantic_core import core_schema\ns = core_schema.is_instance_schema(int)\nprint(s['type'])" "is-instance\n"
+
+-- core_schema.chain_schema returns dict
+#eval assertPy "from pydantic_core import core_schema\ns = core_schema.chain_schema([core_schema.int_schema()])\nprint(s['type'])" "chain\n"

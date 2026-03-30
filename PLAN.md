@@ -777,7 +777,8 @@ For non-deterministic tests, structural equivalence is checked.
 | 7c | Stdlib: cryptography | Done (hashlib sha256/shake_128, hmac, secrets) |
 | 7d | Stdlib: system/OS | Done (sys, os/os.path, time, datetime, pathlib, logging, signal stub, threading stub, tempfile stub) |
 | 8a | Pydantic: foundation | Done (BaseModel, ConfigDict, model_copy, model_dump, model_fields, frozen, inheritance) |
-| 8b-e | Pydantic: validators, core_schema | Not started |
+| 8b | Pydantic: validators, serializers, core_schema | Done (field_validator, model_validator before/after, field_serializer, model_serializer, pydantic_core.core_schema module, evalCoreSchema engine, validator inheritance) |
+| 8c-e | Pydantic: advanced features | Not started |
 | 9a | leanSpec: types | Not started |
 | 9b | leanSpec: SSZ merkleization | Not started |
 | 9c | leanSpec: consensus containers | Not started |

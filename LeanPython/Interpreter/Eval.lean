@@ -4,6 +4,7 @@ import Std.Data.HashMap
 import Std.Data.HashSet
 
 set_option autoImplicit false
+set_option maxHeartbeats 400000
 
 namespace LeanPython.Interpreter.Eval
 
@@ -738,14 +739,33 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         for (k, v) in kwargs do
           pairs := pairs.push (.str k, v)
         allocDict pairs
-    | "pydantic.field_validator" | "pydantic.model_validator" |
-      "pydantic.field_serializer" =>
-        -- Stub: return a no-op decorator (identity function)
-        -- Full validator support will come in Phase 8C
-        return .builtin "pydantic._identity_decorator"
-    | "pydantic._identity_decorator" => match args with
-        | [fn] => return fn
-        | _ => throwTypeError "decorator takes exactly one argument"
+    | "pydantic.field_validator" => do
+        -- field_validator("field1", "field2", ..., mode="after")
+        -- Returns a parametric decorator builtin
+        let fieldNames := args.filterMap fun | .str s => some s | _ => none
+        let mode := match kwargs.find? (fun (k, _) => k == "mode") with
+          | some (_, .str m) => m | _ => "after"
+        let fnStr := ",".intercalate fieldNames
+        return .builtin s!"pydantic.fv_dec:{mode}:{fnStr}"
+    | "pydantic.model_validator" => do
+        -- model_validator(mode="before"|"after")
+        let mode := match kwargs.find? (fun (k, _) => k == "mode") with
+          | some (_, .str m) => m | _ => "after"
+        return .builtin s!"pydantic.mv_dec:{mode}"
+    | "pydantic.field_serializer" => do
+        -- field_serializer("field1", ..., when_used="always"|"json")
+        let fieldNames := args.filterMap fun | .str s => some s | _ => none
+        let whenUsed := match kwargs.find? (fun (k, _) => k == "when_used") with
+          | some (_, .str w) => w | _ => "always"
+        let fnStr := ",".intercalate fieldNames
+        return .builtin s!"pydantic.fs_dec:{whenUsed}:{fnStr}"
+    | "pydantic.model_serializer" => do
+        -- model_serializer(mode="plain"|"wrap", when_used="always"|"json")
+        let mode := match kwargs.find? (fun (k, _) => k == "mode") with
+          | some (_, .str m) => m | _ => "plain"
+        let whenUsed := match kwargs.find? (fun (k, _) => k == "when_used") with
+          | some (_, .str w) => w | _ => "always"
+        return .builtin s!"pydantic.ms_dec:{mode}:{whenUsed}"
     | "dataclass" => match args with
       | [cls@(.classObj _)] => applyDataclass cls false false
       | [] =>
@@ -786,6 +806,119 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         match args with
         | [obj] => getAttributeValue obj attrName
         | _ => throwTypeError "attrgetter object takes exactly 1 argument"
+      else if name.startsWith "pydantic.fv_dec:" then do
+        -- Parametric field_validator decorator: wraps fn in marker tuple
+        let rest := String.ofList (name.toList.drop "pydantic.fv_dec:".length)
+        let parts := rest.splitOn ":"
+        let (mode, fnStr) := match parts with
+          | [m, f] => (m, f) | [m] => (m, "") | _ => ("after", "")
+        let fieldNames := (fnStr.splitOn ",").filter (· ≠ "")
+        let fnArr := fieldNames.map (fun n => Value.str n) |>.toArray
+        let fnListRef ← heapAlloc (.listObj fnArr)
+        match args with
+        | [fn] =>
+          -- Unwrap classmethod if present to get the raw function
+          let rawFn := match fn with | .classMethod inner => inner | other => other
+          return .tuple #[
+            .str "__pydantic_field_validator__", .str mode, .list fnListRef, rawFn]
+        | _ => throwTypeError "field_validator decorator takes exactly one argument"
+      else if name.startsWith "pydantic.mv_dec:" then do
+        -- Parametric model_validator decorator: wraps fn in marker tuple
+        let mode := String.ofList (name.toList.drop "pydantic.mv_dec:".length)
+        match args with
+        | [fn] =>
+          let rawFn := match fn with | .classMethod inner => inner | other => other
+          return .tuple #[
+            .str "__pydantic_model_validator__", .str mode, rawFn]
+        | _ => throwTypeError "model_validator decorator takes exactly one argument"
+      else if name.startsWith "pydantic.fs_dec:" then do
+        -- Parametric field_serializer decorator: wraps fn in marker tuple
+        let rest := String.ofList (name.toList.drop "pydantic.fs_dec:".length)
+        let parts := rest.splitOn ":"
+        let (whenUsed, fnStr) := match parts with
+          | [w, f] => (w, f) | [w] => (w, "") | _ => ("always", "")
+        let fieldNames := (fnStr.splitOn ",").filter (· ≠ "")
+        let fnArr := fieldNames.map (fun n => Value.str n) |>.toArray
+        let fnListRef ← heapAlloc (.listObj fnArr)
+        match args with
+        | [fn] =>
+          return .tuple #[
+            .str "__pydantic_field_serializer__", .str whenUsed, .list fnListRef, fn]
+        | _ => throwTypeError "field_serializer decorator takes exactly one argument"
+      else if name.startsWith "pydantic.ms_dec:" then do
+        -- Parametric model_serializer decorator: wraps fn in marker tuple
+        let rest := String.ofList (name.toList.drop "pydantic.ms_dec:".length)
+        let parts := rest.splitOn ":"
+        let (mode, whenUsed) := match parts with
+          | [m, w] => (m, w) | [m] => (m, "always") | _ => ("plain", "always")
+        match args with
+        | [fn] =>
+          return .tuple #[
+            .str "__pydantic_model_serializer__", .str mode, .str whenUsed, fn]
+        | _ => throwTypeError "model_serializer decorator takes exactly one argument"
+      -- ============================================================
+      -- core_schema builtin functions
+      -- ============================================================
+      else if name == "core_schema.union_schema" then do
+        -- union_schema([schema1, schema2, ...], serialization=...)
+        let schemas := match args with | [s] => s | _ => Value.none
+        let serialization := match kwargs.find? (fun (k, _) => k == "serialization") with
+          | some (_, v) => v | _ => Value.none
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "union")
+        pairs := pairs.push (.str "choices", schemas)
+        if !Value.beq serialization .none then
+          pairs := pairs.push (.str "serialization", serialization)
+        allocDict pairs
+      else if name == "core_schema.is_instance_schema" then do
+        let cls := match args with | [c] => c | _ => Value.none
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "is-instance")
+        pairs := pairs.push (.str "cls", cls)
+        allocDict pairs
+      else if name == "core_schema.chain_schema" then do
+        let schemas := match args with | [s] => s | _ => Value.none
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "chain")
+        pairs := pairs.push (.str "steps", schemas)
+        allocDict pairs
+      else if name == "core_schema.int_schema" then do
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "int")
+        for (k, v) in kwargs do
+          pairs := pairs.push (.str k, v)
+        allocDict pairs
+      else if name == "core_schema.bool_schema" then do
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "bool")
+        for (k, v) in kwargs do
+          pairs := pairs.push (.str k, v)
+        allocDict pairs
+      else if name == "core_schema.bytes_schema" then do
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "bytes")
+        for (k, v) in kwargs do
+          pairs := pairs.push (.str k, v)
+        allocDict pairs
+      else if name == "core_schema.no_info_plain_validator_function" then do
+        let func := match args with | [f] => f | _ => Value.none
+        let serialization := match kwargs.find? (fun (k, _) => k == "serialization") with
+          | some (_, v) => v | _ => Value.none
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "no-info-plain-validator")
+        pairs := pairs.push (.str "function", func)
+        if !Value.beq serialization .none then
+          pairs := pairs.push (.str "serialization", serialization)
+        allocDict pairs
+      else if name == "core_schema.plain_serializer_function_ser_schema" then do
+        let func := match args with | [f] => f | _ => Value.none
+        let mut pairs : Array (Value × Value) := #[]
+        pairs := pairs.push (.str "type", .str "plain-serializer")
+        pairs := pairs.push (.str "function", func)
+        allocDict pairs
+      else if name == "pydantic_core.CoreSchema" || name == "pydantic.GetCoreSchemaHandler" then
+        -- Stub type: just return None (used only for type annotations)
+        return .none
       else if name == "io.BytesIO" then do
         -- Construct a BytesIO instance with _buffer and _pos attrs
         let initBuf := match args with
@@ -1165,6 +1298,52 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             match e with | .classObj er => er == cr | _ => false)
         | _ => false
       if isOurInstance then
+        -- Pydantic: apply model_validator(before) and field_validator(before)
+        let isPydantic := cd.ns["__pydantic_model__"]? == some (.bool true)
+        let (args', kwargs') ← if isPydantic then do
+          -- model_validator(mode="before"): transform entire kwargs dict
+          let mut kw := kwargs
+          match cd.ns["__pydantic_model_validators_before__"]? with
+          | some (.list mvRef) => do
+            let mvArr ← heapGetList mvRef
+            for validatorFn in mvArr do
+              -- Build a dict from kwargs, call validator(cls, data)
+              let kvPairs := kw.map (fun (k, v) => (Value.str k, v)) |>.toArray
+              let kwDict ← allocDict kvPairs
+              let result ← callValueDispatch validatorFn [callee, kwDict] []
+              -- Extract updated kwargs from result dict
+              match result with
+              | .dict dref => do
+                let pairs ← heapGetDict dref
+                kw := pairs.toList.filterMap fun (k, v) =>
+                  match k with | .str s => some (s, v) | _ => none
+              | _ => pure ()  -- validator returned non-dict, keep current
+          | _ => pure ()
+          -- field_validator(mode="before"): transform individual field values
+          match cd.ns["__pydantic_field_validators__"]? with
+          | some (.list fvRef) => do
+            let fvArr ← heapGetList fvRef
+            for fv in fvArr do
+              match fv with
+              | .tuple elems =>
+                if elems.size == 3 then
+                  match elems[0]!, elems[1]! with
+                  | .str fname, .str "before" =>
+                    let validatorFn := elems[2]!
+                    -- Find this field in kwargs
+                    match kw.find? (fun (k, _) => k == fname) with
+                    | some (_, fieldVal) =>
+                      -- Call validator: it was a classmethod, so pass cls as first arg
+                      let validatedVal ← callValueDispatch validatorFn [callee, fieldVal] []
+                      kw := kw.map fun (k, v) =>
+                        if k == fname then (k, validatedVal) else (k, v)
+                    | none => pure ()
+                  | _, _ => pure ()
+              | _ => pure ()
+          | _ => pure ()
+          pure (args, kw)
+        else
+          pure (args, kwargs)
         let mut initFound : Option (Value × Value) := none
         for mroEntry in cd.mro do
           match mroEntry with
@@ -1179,13 +1358,22 @@ partial def callValueDispatch (callee : Value) (args : List Value)
           match fn with
           | .function fref => do
             let fd ← heapGetFunc fref
-            let scope ← bindFuncParams fd.params (inst :: args) kwargs fd.defaults fd.kwDefaults
+            let scope ← bindFuncParams fd.params (inst :: args') kwargs' fd.defaults fd.kwDefaults
             let scopeWithClass := scope.insert "__class__" definingCls
             let _ ← callRegularFunc fd scopeWithClass
-          | _ => let _ ← callValueDispatch fn (inst :: args) kwargs
+          | _ => let _ ← callValueDispatch fn (inst :: args') kwargs'
         | none =>
-          if !args.isEmpty && newFound.isNone then
+          if !args'.isEmpty && newFound.isNone then
             throwTypeError s!"{cd.name}() takes no arguments"
+        -- Pydantic: apply model_validator(mode="after")
+        if isPydantic then
+          match cd.ns["__pydantic_model_validators_after__"]? with
+          | some (.list mvRef) => do
+            let mvArr ← heapGetList mvRef
+            for validatorFn in mvArr do
+              -- Call validator with self; it returns self (or raises)
+              let _ ← callValueDispatch validatorFn [inst] []
+          | _ => pure ()
       return inst
     | other => return other  -- __new__ returned non-instance; skip __init__
   | .instance _ => do
@@ -2188,10 +2376,34 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "field_validator" (.builtin "pydantic.field_validator")
     ns := ns.insert "model_validator" (.builtin "pydantic.model_validator")
     ns := ns.insert "field_serializer" (.builtin "pydantic.field_serializer")
+    ns := ns.insert "model_serializer" (.builtin "pydantic.model_serializer")
     some <$> mkMod ns
   | "pydantic.fields" => do
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "FieldInfo" (.builtin "pydantic.FieldInfo")
+    some <$> mkMod ns
+  | "pydantic.annotated_handlers" => do
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "GetCoreSchemaHandler" (.builtin "pydantic.GetCoreSchemaHandler")
+    some <$> mkMod ns
+  | "pydantic_core" => do
+    let mut ns : Std.HashMap String Value := {}
+    if let some csMod ← getBuiltinModule "pydantic_core.core_schema" then
+      ns := ns.insert "core_schema" csMod
+    ns := ns.insert "CoreSchema" (.builtin "pydantic_core.CoreSchema")
+    some <$> mkMod ns
+  | "pydantic_core.core_schema" => do
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "union_schema" (.builtin "core_schema.union_schema")
+    ns := ns.insert "is_instance_schema" (.builtin "core_schema.is_instance_schema")
+    ns := ns.insert "chain_schema" (.builtin "core_schema.chain_schema")
+    ns := ns.insert "int_schema" (.builtin "core_schema.int_schema")
+    ns := ns.insert "bool_schema" (.builtin "core_schema.bool_schema")
+    ns := ns.insert "bytes_schema" (.builtin "core_schema.bytes_schema")
+    ns := ns.insert "no_info_plain_validator_function"
+      (.builtin "core_schema.no_info_plain_validator_function")
+    ns := ns.insert "plain_serializer_function_ser_schema"
+      (.builtin "core_schema.plain_serializer_function_ser_schema")
     some <$> mkMod ns
   | _ => return none
 
@@ -2963,7 +3175,7 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
       if cd_.ns["__pydantic_model__"]? == some (.bool true) then
         match method with
         | "model_copy" => return ← callPydanticModelCopy receiver iref cref args kwargs
-        | "model_dump" => return ← callPydanticModelDump iref cref args
+        | "model_dump" => return ← callPydanticModelDump iref cref args kwargs
         | _ => pure ()  -- fall through to normal MRO lookup
       let cd ← heapGetClassData cref
       let mut found : Option (Value × Value) := none  -- (function, defining class)
@@ -3998,8 +4210,135 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
       let pairs ← heapGetDict configRef
       pure (parsePydanticConfigFromPairs pairs)
     | _ => pure ({} : PydanticConfig)
+  -- 4b. Scan namespace for validator/serializer marker tuples
+  let mut fieldValidators : Array (String × String × Value) := #[]
+  let mut modelValidatorsBefore : Array Value := #[]
+  let mut modelValidatorsAfter : Array Value := #[]
+  let mut fieldSerializers : Array (String × String × Value) := #[]
+  let mut modelSerializers : Array (String × String × Value) := #[]
+  let mut cleanedNs := cd.ns
+  for (nsName, val) in cd.ns do
+    let marker := match val with
+      | .tuple elems =>
+        match elems.toList with
+        | Value.str tag :: _ => tag
+        | _ => ""
+      | _ => ""
+    if marker == "__pydantic_field_validator__" then do
+      match val with
+      | .tuple elems => do
+        let mode := match elems.toList with | _ :: Value.str m :: _ => m | _ => "after"
+        let func := if elems.size > 3 then elems[3]! else Value.none
+        if elems.size > 2 then
+          match elems[2]! with
+          | .list fnRef => do
+            let arr ← heapGetList fnRef
+            let names := arr.filterMap fun | .str s => some s | _ => none
+            fieldValidators := fieldValidators ++ (names.map fun fname => (fname, mode, func))
+          | _ => pure ()
+        cleanedNs := cleanedNs.insert nsName func
+      | _ => pure ()
+    else if marker == "__pydantic_model_validator__" then do
+      match val with
+      | .tuple elems => do
+        let mode := match elems.toList with | _ :: Value.str m :: _ => m | _ => "after"
+        let func := if elems.size > 2 then elems[2]! else Value.none
+        if mode == "before" then
+          modelValidatorsBefore := modelValidatorsBefore.push func
+        else
+          modelValidatorsAfter := modelValidatorsAfter.push func
+        cleanedNs := cleanedNs.insert nsName func
+      | _ => pure ()
+    else if marker == "__pydantic_field_serializer__" then do
+      match val with
+      | .tuple elems => do
+        let func := if elems.size > 3 then elems[3]! else Value.none
+        let whenUsed := match elems.toList with | _ :: Value.str w :: _ => w | _ => "always"
+        if elems.size > 2 then
+          match elems[2]! with
+          | .list fnRef => do
+            let arr ← heapGetList fnRef
+            let names := arr.filterMap fun | .str s => some s | _ => none
+            fieldSerializers := fieldSerializers ++ (names.map fun fname => (fname, whenUsed, func))
+          | _ => pure ()
+        cleanedNs := cleanedNs.insert nsName func
+      | _ => pure ()
+    else if marker == "__pydantic_model_serializer__" then do
+      match val with
+      | .tuple elems => do
+        let mode := match elems.toList with | _ :: Value.str m :: _ => m | _ => "plain"
+        let whenUsed := match elems.toList with | _ :: _ :: Value.str w :: _ => w | _ => "always"
+        let func := if elems.size > 3 then elems[3]! else Value.none
+        modelSerializers := modelSerializers.push (mode, whenUsed, func)
+        cleanedNs := cleanedNs.insert nsName func
+      | _ => pure ()
+    else pure ()
+  -- 4c. Inherit validators from parent BaseModel classes
+  for mroEntry in cd.mro do
+    match mroEntry with
+    | .classObj mref => do
+      if mref == cref then continue
+      let mcd ← heapGetClassData mref
+      if mcd.ns["__pydantic_model__"]? != some (.bool true) then continue
+      -- Inherit field validators
+      match mcd.ns["__pydantic_field_validators__"]? with
+      | some (.list fvRef) => do
+        let fvArr ← heapGetList fvRef
+        for fv in fvArr do
+          match fv with
+          | .tuple elems =>
+            if elems.size == 3 then
+              match elems[0]!, elems[1]! with
+              | .str fname, .str mode =>
+                if !(fieldValidators.any fun (f, _, _) => f == fname) then
+                  fieldValidators := fieldValidators.push (fname, mode, elems[2]!)
+              | _, _ => pure ()
+          | _ => pure ()
+      | _ => pure ()
+      -- Inherit model validators (before)
+      match mcd.ns["__pydantic_model_validators_before__"]? with
+      | some (.list mvRef) => do
+        let mvArr ← heapGetList mvRef
+        for mv in mvArr do
+          modelValidatorsBefore := modelValidatorsBefore.push mv
+      | _ => pure ()
+      -- Inherit model validators (after)
+      match mcd.ns["__pydantic_model_validators_after__"]? with
+      | some (.list mvRef) => do
+        let mvArr ← heapGetList mvRef
+        for mv in mvArr do
+          modelValidatorsAfter := modelValidatorsAfter.push mv
+      | _ => pure ()
+      -- Inherit field serializers
+      match mcd.ns["__pydantic_field_serializers__"]? with
+      | some (.list fsRef) => do
+        let fsArr ← heapGetList fsRef
+        for fs in fsArr do
+          match fs with
+          | .tuple elems =>
+            if elems.size == 3 then
+              match elems[0]!, elems[1]! with
+              | .str fname, .str whenUsed =>
+                if !(fieldSerializers.any fun (f, _, _) => f == fname) then
+                  fieldSerializers := fieldSerializers.push (fname, whenUsed, elems[2]!)
+              | _, _ => pure ()
+          | _ => pure ()
+      | _ => pure ()
+    | _ => pure ()
+  -- 4d. Store collected validators/serializers as lists on the class
+  let fvStored := fieldValidators.map fun (f, m, func) =>
+    Value.tuple #[.str f, .str m, func]
+  let fvRef ← heapAlloc (.listObj fvStored)
+  let mvbRef ← heapAlloc (.listObj modelValidatorsBefore)
+  let mvaRef ← heapAlloc (.listObj modelValidatorsAfter)
+  let fsStored := fieldSerializers.map fun (f, w, func) =>
+    Value.tuple #[.str f, .str w, func]
+  let fsRef ← heapAlloc (.listObj fsStored)
+  let msStored := modelSerializers.map fun (m, w, func) =>
+    Value.tuple #[.str m, .str w, func]
+  let msRef ← heapAlloc (.listObj msStored)
   -- 5. Build namespace updates
-  let mut nsUpdated := cd.ns
+  let mut nsUpdated := cleanedNs
   -- Mark as Pydantic model
   nsUpdated := nsUpdated.insert "__pydantic_model__" (.bool true)
   -- Store field names list for inheritance and model_copy/model_dump
@@ -4009,6 +4348,12 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
   -- Store config
   nsUpdated := nsUpdated.insert "__pydantic_frozen__" (.bool config.frozen)
   nsUpdated := nsUpdated.insert "__pydantic_extra__" (.str config.extra)
+  -- Store validators/serializers
+  nsUpdated := nsUpdated.insert "__pydantic_field_validators__" (.list fvRef)
+  nsUpdated := nsUpdated.insert "__pydantic_model_validators_before__" (.list mvbRef)
+  nsUpdated := nsUpdated.insert "__pydantic_model_validators_after__" (.list mvaRef)
+  nsUpdated := nsUpdated.insert "__pydantic_field_serializers__" (.list fsRef)
+  nsUpdated := nsUpdated.insert "__pydantic_model_serializers__" (.list msRef)
   -- 6. Build model_fields dict: {field_name: {"annotation": ..., "default": ...}}
   let mut mfPairs : Array (Value × Value) := #[]
   for (name, defVal) in allFields do
@@ -4171,27 +4516,163 @@ partial def callPydanticModelCopy (_receiver : Value) (iref : HeapRef) (cref : H
   allocInstance { cls := id_.cls, attrs := newAttrs }
 
 -- ============================================================
+-- Pydantic core_schema evaluation engine
+-- ============================================================
+
+/-- Evaluate a core_schema descriptor against an input value, returning the validated value.
+    Schema descriptors are dicts with a "type" key indicating the validation strategy. -/
+partial def evalCoreSchema (schema : Value) (input : Value) : InterpM Value := do
+  match schema with
+  | .dict ref => do
+    let pairs ← heapGetDict ref
+    let schemaType := (pairs.toList.find? fun (k, _) => Value.beq k (.str "type")).map Prod.snd
+    match schemaType with
+    | some (.str "union") =>
+      -- Try each choice; return first success
+      let choices := (pairs.toList.find? fun (k, _) => Value.beq k (.str "choices")).map Prod.snd
+      match choices with
+      | some (.list cRef) => do
+        let cArr ← heapGetList cRef
+        let mut lastErr : Option String := none
+        for choice in cArr do
+          let result ← try
+            let v ← evalCoreSchema choice input
+            pure (some v)
+          catch e =>
+            lastErr := some (toString e)
+            pure none
+          if let some v := result then return v
+        throwValueError s!"No matching schema in union: {lastErr.getD "unknown"}"
+      | _ => return input
+    | some (.str "is-instance") =>
+      -- Check isinstance; pass through if match, else fail
+      let cls := (pairs.toList.find? fun (k, _) => Value.beq k (.str "cls")).map Prod.snd
+      match cls with
+      | some clsVal =>
+        let result ← builtinIsinstance [input, clsVal]
+        match result with
+        | .bool true => return input
+        | _ => throwTypeError s!"Expected instance of type, got {typeName input}"
+      | none => return input
+    | some (.str "chain") =>
+      -- Apply schemas sequentially
+      let steps := (pairs.toList.find? fun (k, _) => Value.beq k (.str "steps")).map Prod.snd
+      match steps with
+      | some (.list sRef) => do
+        let sArr ← heapGetList sRef
+        let mut current := input
+        for step in sArr do
+          current ← evalCoreSchema step current
+        return current
+      | _ => return input
+    | some (.str "int") =>
+      -- Validate integer with optional constraints
+      match input with
+      | .int n => do
+        let ge := (pairs.toList.find? fun (k, _) => Value.beq k (.str "ge")).map Prod.snd
+        let lt := (pairs.toList.find? fun (k, _) => Value.beq k (.str "lt")).map Prod.snd
+        match ge with
+        | some (.int lower) =>
+          if n < lower then throwValueError s!"Value {n} < minimum {lower}"
+        | _ => pure ()
+        match lt with
+        | some (.int upper) =>
+          if n >= upper then throwValueError s!"Value {n} >= maximum {upper}"
+        | _ => pure ()
+        return input
+      | _ => throwTypeError s!"Expected int, got {typeName input}"
+    | some (.str "bool") =>
+      match input with
+      | .bool _ => return input
+      | _ => throwTypeError s!"Expected bool, got {typeName input}"
+    | some (.str "bytes") =>
+      match input with
+      | .bytes b => do
+        let minLen := (pairs.toList.find? fun (k, _) => Value.beq k (.str "min_length")).map Prod.snd
+        let maxLen := (pairs.toList.find? fun (k, _) => Value.beq k (.str "max_length")).map Prod.snd
+        match minLen with
+        | some (.int ml) =>
+          if (b.size : Int) < ml then throwValueError s!"Bytes too short: {b.size} < {ml}"
+        | _ => pure ()
+        match maxLen with
+        | some (.int ml) =>
+          if (b.size : Int) > ml then throwValueError s!"Bytes too long: {b.size} > {ml}"
+        | _ => pure ()
+        return input
+      | _ => throwTypeError s!"Expected bytes, got {typeName input}"
+    | some (.str "no-info-plain-validator") =>
+      -- Call the validator function with input
+      let func := (pairs.toList.find? fun (k, _) => Value.beq k (.str "function")).map Prod.snd
+      match func with
+      | some f => callValueDispatch f [input] []
+      | none => return input
+    | some (.str "plain-serializer") =>
+      -- Serializer schemas don't validate; pass through
+      return input
+    | _ => return input
+  | _ => return input
+
+-- ============================================================
 -- Pydantic model_dump: serialize instance to dict
 -- ============================================================
 
 /-- model_dump(mode="python") — serialize to dict. -/
 partial def callPydanticModelDump (iref : HeapRef) (cref : HeapRef)
-    (_args : List Value) : InterpM Value := do
+    (_args : List Value) (kwargs : List (String × Value)) : InterpM Value := do
   let id_ ← heapGetInstanceData iref
   let cd ← heapGetClassData cref
+  let mode := match kwargs.find? (fun (k, _) => k == "mode") with
+    | some (_, .str m) => m | _ => "python"
   -- Get field names
   let fieldNames ← match cd.ns["__pydantic_field_names__"]? with
     | some (.list fnRef) => do
       let fnArr ← heapGetList fnRef
       pure (fnArr.toList.filterMap fun v => match v with | .str s => some s | _ => none)
     | _ => pure ([] : List String)
-  -- Build dict from field values
+  -- Collect field serializers for json mode
+  let mut serializerMap : List (String × Value) := []
+  if mode == "json" then
+    match cd.ns["__pydantic_field_serializers__"]? with
+    | some (.list fsRef) => do
+      let fsArr ← heapGetList fsRef
+      for fs in fsArr do
+        match fs with
+        | .tuple elems =>
+          if elems.size >= 3 then
+            match elems[0]! with
+            | .str fname => serializerMap := serializerMap ++ [(fname, elems[2]!)]
+            | _ => pure ()
+        | _ => pure ()
+    | _ => pure ()
+  -- Build dict from field values, applying serializers if applicable
   let mut pairs : Array (Value × Value) := #[]
+  let inst := Value.instance iref
   for name in fieldNames do
     match id_.attrs[name]? with
-    | some v => pairs := pairs.push (.str name, v)
+    | some v => do
+      let serialized ← match serializerMap.find? (fun (f, _) => f == name) with
+        | some (_, serFn) =>
+          -- Call serializer: serializer(self, value, _info)
+          callValueDispatch serFn [inst, v, .none] []
+        | none => pure v
+      pairs := pairs.push (.str name, serialized)
     | none => pure ()
-  allocDict pairs
+  -- Check for model_serializer
+  if mode == "json" then
+    match cd.ns["__pydantic_model_serializers__"]? with
+    | some (.list msRef) => do
+      let msArr ← heapGetList msRef
+      if msArr.size > 0 then
+        match msArr[0]! with
+        | .tuple elems =>
+          if elems.size >= 3 then
+            return ← callValueDispatch elems[2]! [inst] []
+          else allocDict pairs
+        | _ => allocDict pairs
+      else allocDict pairs
+    | _ => allocDict pairs
+  else
+    allocDict pairs
 
 end
 
