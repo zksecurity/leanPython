@@ -82,6 +82,7 @@ structure ClassData where
   bases     : Array Value
   mro       : Array Value
   ns        : Std.HashMap String Value
+  slots     : Option (Array String) := none
 
 /-- Runtime instance data stored on the heap. -/
 structure InstanceData where
@@ -314,6 +315,8 @@ def builtinNames : List String :=
    "iter", "next", "hasattr", "getattr", "setattr", "callable",
    "issubclass", "super", "object", "bytes",
    "staticmethod", "classmethod", "property",
+   -- Dataclass
+   "dataclass",
    -- Exception classes
    "ValueError", "TypeError", "KeyError", "IndexError",
    "RuntimeError", "ZeroDivisionError", "AssertionError",

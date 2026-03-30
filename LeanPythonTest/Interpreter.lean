@@ -540,3 +540,76 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- Instance identity equality (no __eq__ defined)
 #eval assertPy "class C:\n    pass\na = C()\nb = C()\nprint(a == a)\nprint(a == b)\n" "True\nFalse\n"
+
+-- ============================================================
+-- Phase 5C: Advanced class mechanics
+-- ============================================================
+
+-- C3 MRO: diamond inheritance
+#eval assertPy "class A:\n    def who(self):\n        return 'A'\nclass B(A):\n    def who(self):\n        return 'B'\nclass C(A):\n    def who(self):\n        return 'C'\nclass D(B, C):\n    pass\nprint(D().who())\n" "B\n"
+
+-- C3 MRO: method from second base when first doesn't define it
+#eval assertPy "class A:\n    def f(self):\n        return 'A'\nclass B(A):\n    pass\nclass C(A):\n    def f(self):\n        return 'C'\nclass D(B, C):\n    pass\nprint(D().f())\n" "C\n"
+
+-- C3 MRO: super() cooperative diamond
+#eval assertPy "class A:\n    def __init__(self):\n        self.log = 'A'\nclass B(A):\n    def __init__(self):\n        super().__init__()\n        self.log += 'B'\nclass C(A):\n    def __init__(self):\n        super().__init__()\n        self.log += 'C'\nclass D(B, C):\n    def __init__(self):\n        super().__init__()\n        self.log += 'D'\nd = D()\nprint(d.log)\n" "ACBD\n"
+
+-- __annotations__ access
+#eval assertPy "class Pt:\n    x: int\n    y: str\nann = Pt.__annotations__\nprint('x' in ann)\nprint('y' in ann)\n" "True\nTrue\n"
+
+-- __dict__ on instances
+#eval assertPy "class C:\n    def __init__(self, x):\n        self.x = x\nc = C(42)\nd = c.__dict__\nprint('x' in d)\nprint(d['x'])\n" "True\n42\n"
+
+-- __class__ on instances
+#eval assertPy "class C:\n    pass\nc = C()\nprint(c.__class__ is C)\n" "True\n"
+
+-- __name__ on classes
+#eval assertPy "class MyClass:\n    pass\nprint(MyClass.__name__)\n" "MyClass\n"
+
+-- __new__ basic: custom allocation
+#eval assertPy "class C:\n    def __new__(cls, v):\n        inst = object.__new__(cls)\n        inst.tag = 'created'\n        return inst\n    def __init__(self, v):\n        self.v = v\nc = C(10)\nprint(c.v)\nprint(c.tag)\n" "10\ncreated\n"
+
+-- __new__ validation: reject invalid args
+#eval assertPy "class Positive:\n    def __new__(cls, v):\n        if v <= 0:\n            raise ValueError('must be positive')\n        inst = object.__new__(cls)\n        return inst\n    def __init__(self, v):\n        self.v = v\np = Positive(5)\nprint(p.v)\n" "5\n"
+
+-- __getattr__ fallback
+#eval assertPy "class C:\n    def __getattr__(self, name):\n        return 'default_' + name\nc = C()\nprint(c.foo)\nprint(c.bar)\n" "default_foo\ndefault_bar\n"
+
+-- __getattr__ only called when normal lookup fails
+#eval assertPy "class C:\n    def __init__(self):\n        self.x = 42\n    def __getattr__(self, name):\n        return 'fallback'\nc = C()\nprint(c.x)\nprint(c.y)\n" "42\nfallback\n"
+
+-- __setattr__ intercept (uses print to avoid infinite recursion)
+#eval assertPy "class C:\n    def __setattr__(self, name, value):\n        print('setting ' + name)\nc = C()\nc.x = 1\nc.y = 2\n" "setting x\nsetting y\n"
+
+-- __delattr__ hook
+#eval assertPy "class C:\n    def __init__(self):\n        self.x = 1\n        self.deleted = []\n    def __delattr__(self, name):\n        self.deleted.append(name)\nc = C()\ndel c.x\nprint(c.deleted)\n" "['x']\n"
+
+-- Class decorator
+#eval assertPy "def add_greet(cls):\n    cls.greet = lambda self: 'hi'\n    return cls\n@add_greet\nclass C:\n    pass\nprint(C().greet())\n" "hi\n"
+
+-- Class decorator with args-like pattern (function returning decorator)
+#eval assertPy "def tag(name):\n    def decorator(cls):\n        cls.tag_name = name\n        return cls\n    return decorator\n@tag('myTag')\nclass C:\n    pass\nprint(C.tag_name)\n" "myTag\n"
+
+-- __slots__ restricts attributes
+#eval assertPyError "class C:\n    __slots__ = ('x', 'y')\nc = C()\nc.x = 1\nc.z = 3\n" "has no attribute"
+
+-- __slots__ allows listed attributes
+#eval assertPy "class C:\n    __slots__ = ('x', 'y')\nc = C()\nc.x = 1\nc.y = 2\nprint(c.x)\nprint(c.y)\n" "1\n2\n"
+
+-- @dataclass basic: auto __init__ and __repr__
+#eval assertPy "@dataclass\nclass Point:\n    x: int\n    y: int\np = Point(3, 4)\nprint(p.x)\nprint(p.y)\n" "3\n4\n"
+
+-- @dataclass __eq__
+#eval assertPy "@dataclass\nclass Point:\n    x: int\n    y: int\nprint(Point(1, 2) == Point(1, 2))\nprint(Point(1, 2) == Point(1, 3))\n" "True\nFalse\n"
+
+-- @dataclass __repr__
+#eval assertPy "@dataclass\nclass Point:\n    x: int\n    y: int\nprint(repr(Point(3, 4)))\n" "Point(x=3, y=4)\n"
+
+-- @dataclass(frozen=True)
+#eval assertPyError "@dataclass(frozen=True)\nclass Frozen:\n    x: int\nf = Frozen(5)\nf.x = 10\n" "cannot assign"
+
+-- @dataclass with default values
+#eval assertPy "@dataclass\nclass Config:\n    x: int = 10\n    y: int = 20\nc = Config()\nprint(c.x)\nprint(c.y)\n" "10\n20\n"
+
+-- @dataclass with partial defaults
+#eval assertPy "@dataclass\nclass Config:\n    x: int\n    y: int = 99\nc = Config(1)\nprint(c.x)\nprint(c.y)\n" "1\n99\n"

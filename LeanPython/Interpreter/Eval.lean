@@ -163,6 +163,61 @@ private def unaryOpToDunder : UnaryOp → Option String
   | .not_ => none
 
 -- ============================================================
+-- C3 MRO linearization (outside mutual block — only uses heap ops)
+-- ============================================================
+
+/-- C3 MRO merge: repeatedly pick the first head that doesn't appear
+    in the tail of any other non-empty list. -/
+private partial def c3Merge (lists : List (List Value)) : InterpM (List Value) := do
+  let nonEmpty := lists.filter (!·.isEmpty)
+  if nonEmpty.isEmpty then return []
+  -- Find a good head
+  let mut goodHead : Option Value := none
+  for l in nonEmpty do
+    let candidate := l.head!
+    let inTail := nonEmpty.any fun other =>
+      match other with
+      | _ :: rest => rest.any fun v => Value.beq v candidate
+      | [] => false
+    if !inTail then
+      goodHead := some candidate
+      break
+  match goodHead with
+  | none => throwTypeError "Cannot create a consistent method resolution order (MRO)"
+  | some head =>
+    let cleaned := nonEmpty.map fun l =>
+      if l.isEmpty then []
+      else if Value.beq l.head! head then l.tail!
+      else l
+    let rest ← c3Merge cleaned
+    return head :: rest
+
+/-- Compute C3 MRO for a class with given bases. -/
+private partial def computeC3Mro (selfClass : Value) (bases : Array Value)
+    : InterpM (Array Value) := do
+  if bases.isEmpty then return #[selfClass]
+  let mut baseMros : List (List Value) := []
+  for base in bases do
+    match base with
+    | .classObj bref => do
+      let bcd ← heapGetClassData bref
+      baseMros := baseMros ++ [bcd.mro.toList]
+    | _ => pure ()
+  baseMros := baseMros ++ [bases.toList]
+  let merged ← c3Merge baseMros
+  return (#[selfClass] ++ merged.toArray)
+
+/-- Convert a runtime Value back to an AST Constant for default parameters. -/
+private def valueToConstant : Value → Constant
+  | .int n => .int n
+  | .float f => .float_ f
+  | .str s => .string s
+  | .bool true => .true_
+  | .bool false => .false_
+  | .none => .none_
+  | _ => .none_
+
+-- ============================================================
 -- Mutual block: evalExpr, execStmt, and helpers
 -- ============================================================
 
@@ -526,39 +581,92 @@ partial def callValueDispatch (callee : Value) (args : List Value)
           | none => args' := args' ++ [arg]
         | other => args' := args' ++ [other]
       callBuiltin name args' kwargs
+    | "dataclass" => match args with
+      | [cls@(.classObj _)] => applyDataclass cls false false
+      | [] =>
+        -- dataclass() with keyword args returns a decorator
+        let frozen := kwargs.any fun (k, v) => k == "frozen" && Value.beq v (.bool true)
+        let slotsKw := kwargs.any fun (k, v) => k == "slots" && Value.beq v (.bool true)
+        -- Return a lambda-like builtin that captures frozen/slots config
+        let tag := if frozen && slotsKw then "dataclass_frozen_slots"
+          else if frozen then "dataclass_frozen"
+          else if slotsKw then "dataclass_slots"
+          else "dataclass"
+        return .builtin tag
+      | _ => throwTypeError "dataclass() takes a class or keyword arguments"
+    | "dataclass_frozen" => match args with
+      | [cls@(.classObj _)] => applyDataclass cls true false
+      | _ => throwTypeError "dataclass() takes a class"
+    | "dataclass_frozen_slots" => match args with
+      | [cls@(.classObj _)] => applyDataclass cls true true
+      | _ => throwTypeError "dataclass() takes a class"
+    | "dataclass_slots" => match args with
+      | [cls@(.classObj _)] => applyDataclass cls false true
+      | _ => throwTypeError "dataclass() takes a class"
     | _ => callBuiltin name args kwargs
   | .function ref => do
     let fd ← heapGetFunc ref
     callUserFunc fd args kwargs
   | .boundMethod receiver method => callBoundMethod receiver method args
   | .classObj cref => do
-    -- Instance creation: allocate instance, call __init__
     let cd ← heapGetClassData cref
-    let inst ← allocInstance { cls := callee, attrs := {} }
-    -- Look up __init__ in MRO, tracking which class defines it
-    let mut initFound : Option (Value × Value) := none  -- (function, defining class)
+    -- Step 1: Look up __new__ in MRO
+    let mut newFound : Option (Value × Value) := none
     for mroEntry in cd.mro do
       match mroEntry with
       | .classObj mref => do
         let mcd ← heapGetClassData mref
-        if let some fn := mcd.ns["__init__"]? then
-          initFound := some (fn, mroEntry)
+        if let some fn := mcd.ns["__new__"]? then
+          newFound := some (fn, mroEntry)
           break
       | _ => pure ()
-    -- Call __init__ if found, injecting __class__ for super() support
-    match initFound with
+    -- Step 2: Create the instance via __new__ or default allocation
+    let inst ← match newFound with
     | some (fn, definingCls) =>
-      match fn with
+      -- __new__ is implicitly static: unwrap staticMethod if present
+      let rawFn := match fn with
+        | .staticMethod inner => inner
+        | other => other
+      match rawFn with
       | .function fref => do
         let fd ← heapGetFunc fref
-        let scope ← bindFuncParams fd.params (inst :: args) kwargs fd.defaults fd.kwDefaults
+        let scope ← bindFuncParams fd.params (callee :: args) kwargs fd.defaults fd.kwDefaults
         let scopeWithClass := scope.insert "__class__" definingCls
-        let _ ← callRegularFunc fd scopeWithClass
-      | _ => let _ ← callValueDispatch fn (inst :: args) kwargs
-    | none =>
-      if !args.isEmpty then
-        throwTypeError s!"{cd.name}() takes no arguments"
-    return inst
+        callRegularFunc fd scopeWithClass
+      | _ => callValueDispatch rawFn (callee :: args) kwargs
+    | none => allocInstance { cls := callee, attrs := {} }
+    -- Step 3: Call __init__ only if inst is an instance of this class
+    match inst with
+    | .instance iref => do
+      let instData ← heapGetInstanceData iref
+      let isOurInstance := match instData.cls with
+        | .classObj cr => cr == cref || (cd.mro.any fun e =>
+            match e with | .classObj er => er == cr | _ => false)
+        | _ => false
+      if isOurInstance then
+        let mut initFound : Option (Value × Value) := none
+        for mroEntry in cd.mro do
+          match mroEntry with
+          | .classObj mref => do
+            let mcd ← heapGetClassData mref
+            if let some fn := mcd.ns["__init__"]? then
+              initFound := some (fn, mroEntry)
+              break
+          | _ => pure ()
+        match initFound with
+        | some (fn, definingCls) =>
+          match fn with
+          | .function fref => do
+            let fd ← heapGetFunc fref
+            let scope ← bindFuncParams fd.params (inst :: args) kwargs fd.defaults fd.kwDefaults
+            let scopeWithClass := scope.insert "__class__" definingCls
+            let _ ← callRegularFunc fd scopeWithClass
+          | _ => let _ ← callValueDispatch fn (inst :: args) kwargs
+        | none =>
+          if !args.isEmpty && newFound.isNone then
+            throwTypeError s!"{cd.name}() takes no arguments"
+      return inst
+    | other => return other  -- __new__ returned non-instance; skip __init__
   | .instance _ => do
     -- Try __call__ dunder
     match ← callDunder callee "__call__" args with
@@ -756,10 +864,13 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     if knownTupleMethods.contains attr then return .boundMethod obj attr
     else throwAttributeError s!"'tuple' object has no attribute '{attr}'"
   | .builtin name =>
-    -- Type methods like int.from_bytes, bytes.fromhex
+    -- Type methods like int.from_bytes, bytes.fromhex, object.__new__
     match name, attr with
     | "int", "from_bytes" => return .boundMethod obj attr
     | "bytes", "fromhex" => return .boundMethod obj attr
+    | "object", "__new__" => return .boundMethod obj attr
+    | "object", "__setattr__" => return .boundMethod obj attr
+    | "object", "__delattr__" => return .boundMethod obj attr
     | _, _ => throwAttributeError s!"type '{name}' has no attribute '{attr}'"
   | .exception _ _ =>
     match attr with
@@ -771,6 +882,14 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     else throwAttributeError s!"'generator' object has no attribute '{attr}'"
   | .classObj cref => do
     let cd ← heapGetClassData cref
+    -- Special attributes on class objects
+    if attr == "__name__" then return .str cd.name
+    if attr == "__mro__" then return .tuple cd.mro
+    if attr == "__dict__" then
+      let mut pairs : Array (Value × Value) := #[]
+      for (k, v) in cd.ns do
+        pairs := pairs.push (.str k, v)
+      return ← allocDict pairs
     -- Look up in own namespace first, then walk MRO
     for mroEntry in cd.mro do
       match mroEntry with
@@ -786,6 +905,13 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     throwAttributeError s!"type object '{cd.name}' has no attribute '{attr}'"
   | .instance iref => do
     let id_ ← heapGetInstanceData iref
+    -- Special attributes: __dict__ and __class__
+    if attr == "__dict__" then
+      let mut pairs : Array (Value × Value) := #[]
+      for (k, v) in id_.attrs do
+        pairs := pairs.push (.str k, v)
+      return ← allocDict pairs
+    if attr == "__class__" then return id_.cls
     -- Check for data descriptors (property) in MRO first (before instance attrs)
     match id_.cls with
     | .classObj cref => do
@@ -821,6 +947,20 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
             | .staticMethod fn => return fn
             | .classMethod _ => return .boundMethod id_.cls attr
             | _ => return v
+        | _ => pure ()
+      -- Fallback: try __getattr__ hook before raising
+      for mroEntry in cd.mro do
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if let some fn := mcd.ns["__getattr__"]? then
+            match fn with
+            | .function fref => do
+              let fd ← heapGetFunc fref
+              let scope ← bindFuncParams fd.params [obj, .str attr] [] fd.defaults fd.kwDefaults
+              let scopeWithClass := scope.insert "__class__" mroEntry
+              return ← callRegularFunc fd scopeWithClass
+            | _ => return ← callValueDispatch fn [obj, .str attr] []
         | _ => pure ()
       throwAttributeError s!"'{cd.name}' object has no attribute '{attr}'"
     | _ =>
@@ -944,6 +1084,33 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
       heapSetDict ref newPairs
     | .instance iref => do
       let id_ ← heapGetInstanceData iref
+      -- Check for __setattr__ hook first
+      let mut setattrFound : Option (Value × Value) := none
+      match id_.cls with
+      | .classObj cref => do
+        let cd ← heapGetClassData cref
+        for mroEntry in cd.mro do
+          if setattrFound.isSome then break
+          match mroEntry with
+          | .classObj mref => do
+            let mcd ← heapGetClassData mref
+            if let some fn := mcd.ns["__setattr__"]? then
+              setattrFound := some (fn, mroEntry)
+          | _ => pure ()
+      | _ => pure ()
+      match setattrFound with
+      | some (fn, definingCls) =>
+        match fn with
+        | .function fref => do
+          let fd ← heapGetFunc fref
+          let scope ← bindFuncParams fd.params [objVal, .str attr, value] [] fd.defaults fd.kwDefaults
+          let scopeWithClass := scope.insert "__class__" definingCls
+          let _ ← callRegularFunc fd scopeWithClass
+          return ()
+        | _ =>
+          let _ ← callValueDispatch fn [objVal, .str attr, value] []
+          return ()
+      | none => pure ()  -- fall through to property / direct store
       -- Check if the class has a property setter for this attr
       let mut propSetter : Option Value := none
       match id_.cls with
@@ -964,7 +1131,16 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
       | some setter => do
         let _ ← callValueDispatch setter [objVal, value] []
         pure ()
-      | none =>
+      | none => do
+        -- Check __slots__ restriction
+        let id2 ← heapGetInstanceData iref
+        match id2.cls with
+        | .classObj cref2 => do
+          let cd2 ← heapGetClassData cref2
+          if let some allowedSlots := cd2.slots then
+            if !allowedSlots.contains attr then
+              throwAttributeError s!"'{cd2.name}' object has no attribute '{attr}'"
+        | _ => pure ()
         heapSetInstanceData iref { id_ with attrs := id_.attrs.insert attr value }
     | .classObj cref => do
       let cd ← heapGetClassData cref
@@ -1027,7 +1203,31 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | _ => evalBinOp op current rhs
     assignToTarget target result
 
-  | .annAssign target _ann value _simple _ => do
+  | .annAssign target ann value _simple _ => do
+    -- Record annotation in __annotations__ dict if in scope
+    match target with
+    | .name n _ => do
+      let annStr ← valueToStr (← evalExpr ann)
+      let annDict ← do
+        try
+          let existing ← lookupVariable "__annotations__"
+          pure existing
+        catch _ => pure .none
+      match annDict with
+      | .dict ref => do
+        let pairs ← heapGetDict ref
+        let key := Value.str n
+        let mut newPairs := pairs
+        let mut found := false
+        for i in [:pairs.size] do
+          if Value.beq pairs[i]!.1 key then
+            newPairs := newPairs.set! i (key, .str annStr)
+            found := true
+            break
+        if !found then newPairs := newPairs.push (key, .str annStr)
+        heapSetDict ref newPairs
+      | _ => pure ()
+    | _ => pure ()
     if let some valExpr := value then
       assignToTarget target (← evalExpr valExpr)
 
@@ -1112,6 +1312,40 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
         let objVal ← evalExpr obj
         let idxVal ← evalExpr idx
         deleteSubscriptValue objVal idxVal
+      | .attribute obj attr _ => do
+        let objVal ← evalExpr obj
+        match objVal with
+        | .instance iref => do
+          let id_ ← heapGetInstanceData iref
+          -- Check for __delattr__ hook
+          let mut delattrFound : Option (Value × Value) := none
+          match id_.cls with
+          | .classObj cref => do
+            let cd ← heapGetClassData cref
+            for mroEntry in cd.mro do
+              if delattrFound.isSome then break
+              match mroEntry with
+              | .classObj mref => do
+                let mcd ← heapGetClassData mref
+                if let some fn := mcd.ns["__delattr__"]? then
+                  delattrFound := some (fn, mroEntry)
+              | _ => pure ()
+          | _ => pure ()
+          match delattrFound with
+          | some (fn, definingCls) =>
+            match fn with
+            | .function fref => do
+              let fd ← heapGetFunc fref
+              let scope ← bindFuncParams fd.params [objVal, .str attr] [] fd.defaults fd.kwDefaults
+              let scopeWithClass := scope.insert "__class__" definingCls
+              let _ ← callRegularFunc fd scopeWithClass
+            | _ => let _ ← callValueDispatch fn [objVal, .str attr] []
+          | none =>
+            heapSetInstanceData iref { id_ with attrs := id_.attrs.erase attr }
+        | .classObj cref => do
+          let cd ← heapGetClassData cref
+          heapSetClassData cref { cd with ns := cd.ns.erase attr }
+        | _ => throwRuntimeError (.runtimeError "cannot delete attribute")
       | _ => throwRuntimeError (.runtimeError "invalid delete target")
 
   | .global_ names _ => do
@@ -1125,6 +1359,9 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     let bases ← cd.bases.mapM evalExpr
     -- Execute class body in a new scope
     pushScope {}
+    -- Initialize __annotations__ dict for the class body
+    let annRef ← heapAlloc (.dictObj #[])
+    setVariable "__annotations__" (.dict annRef)
     try execStmts cd.body
     catch
     | .control _ => pure ()
@@ -1138,27 +1375,38 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     let mut ns : Std.HashMap String Value := {}
     for (k, v) in classScope do
       ns := ns.insert k v
-    -- Compute linear MRO: [self, ...bases' MROs flattened]
-    let selfPlaceholder := Value.none  -- placeholder, replaced after allocation
-    let mut mro : Array Value := #[selfPlaceholder]
-    for base in bases do
-      match base with
-      | .classObj bref => do
-        let bcd ← heapGetClassData bref
-        for entry in bcd.mro do
-          -- Avoid duplicates
-          let isDup := mro.any fun e => Value.beq e entry
-          if !isDup then mro := mro.push entry
-      | _ => pure ()  -- ignore non-class bases for now
-    -- Allocate the class
-    let classVal ← allocClassObj { name := cd.name, bases := bases.toArray, mro := mro, ns := ns }
-    -- Fix MRO[0] to point to the actual class
+    -- Check for __slots__
+    let slotsOpt ← match ns["__slots__"]? with
+    | some (.list ref) => do
+      let items ← heapGetList ref
+      let names ← items.toList.mapM fun v =>
+        match v with
+        | .str s => pure s
+        | _ => throwTypeError "__slots__ items must be strings"
+      pure (some names.toArray)
+    | some (.tuple items) => do
+      let names ← items.toList.mapM fun v =>
+        match v with
+        | .str s => pure s
+        | _ => throwTypeError "__slots__ items must be strings"
+      pure (some names.toArray)
+    | none => pure none
+    | _ => pure none
+    -- Allocate the class with placeholder MRO
+    let classVal ← allocClassObj { name := cd.name, bases := bases.toArray, mro := #[], ns := ns, slots := slotsOpt }
+    -- Compute C3 MRO and fix up
+    let mro ← computeC3Mro classVal bases.toArray
     match classVal with
     | .classObj cref => do
       let cd' ← heapGetClassData cref
-      heapSetClassData cref { cd' with mro := cd'.mro.set! 0 classVal }
+      heapSetClassData cref { cd' with mro := mro }
     | _ => pure ()
-    setVariable cd.name classVal
+    -- Apply class decorators (innermost first = reverse the list)
+    let mut decorated := classVal
+    for dec in cd.decoratorList.reverse do
+      let decVal ← evalExpr dec
+      decorated ← callValueDispatch decVal [decorated] []
+    setVariable cd.name decorated
 
   | .raise_ exprOpt cause _ => do
     -- Evaluate cause if present (for validation; chaining info not stored yet)
@@ -1671,6 +1919,27 @@ partial def callBuiltinTypeMethod (typeName_ : String) (method : String) (args :
         i := i + 2
       return .bytes result
     | _ => throwTypeError "fromhex() takes exactly 1 argument"
+  | "object", "__new__" =>
+    -- object.__new__(cls) — allocate a bare instance of cls
+    match args with
+    | [cls@(.classObj _)] => allocInstance { cls := cls, attrs := {} }
+    | _ => throwTypeError "object.__new__(cls): cls must be a type"
+  | "object", "__setattr__" =>
+    -- object.__setattr__(self, name, value) — direct attribute store
+    match args with
+    | [.instance iref, .str name, value] => do
+      let id_ ← heapGetInstanceData iref
+      heapSetInstanceData iref { id_ with attrs := id_.attrs.insert name value }
+      return .none
+    | _ => throwTypeError "object.__setattr__() takes 3 arguments"
+  | "object", "__delattr__" =>
+    -- object.__delattr__(self, name) — direct attribute delete
+    match args with
+    | [.instance iref, .str name] => do
+      let id_ ← heapGetInstanceData iref
+      heapSetInstanceData iref { id_ with attrs := id_.attrs.erase name }
+      return .none
+    | _ => throwTypeError "object.__delattr__() takes 2 arguments"
   | _, _ => throwAttributeError s!"type '{typeName_}' has no attribute '{method}'"
 where
   hexCharToNat (c : Char) : InterpM Nat := do
@@ -2160,6 +2429,125 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
       return .bool true
     | _ => throwTypeError "isdisjoint() takes exactly one argument"
   | _ => throwAttributeError s!"'set' object has no attribute '{method}'"
+
+-- ============================================================
+-- @dataclass implementation
+-- ============================================================
+
+/-- Apply @dataclass decorator to a class. Generates __init__, __repr__, __eq__. -/
+partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
+    : InterpM Value := do
+  match cls with
+  | .classObj cref => do
+    let cd ← heapGetClassData cref
+    -- Read __annotations__ to get field names
+    let fieldNames ← match cd.ns["__annotations__"]? with
+      | some (.dict annRef) => do
+        let pairs ← heapGetDict annRef
+        pure (pairs.map fun (k, _) =>
+          match k with | .str s => s | _ => "").toList
+      | _ => pure ([] : List String)
+    -- Get default values from class namespace
+    let mut fieldsWithDefaults : List (String × Option Value) := []
+    for name in fieldNames do
+      fieldsWithDefaults := fieldsWithDefaults ++ [(name, cd.ns[name]?)]
+    -- Generate __init__ if not already defined
+    let mut nsUpdated := cd.ns
+    if cd.ns["__init__"]?.isNone then
+      -- Build synthetic __init__: def __init__(self, field1, field2, ...): self.field1 = field1; ...
+      -- For frozen dataclasses, use object.__setattr__(self, name, value) to bypass frozen __setattr__
+      let selfArg := Arg.mk "self" none dummySpan
+      let paramArgs := fieldNames.map fun n => Arg.mk n none dummySpan
+      let bodyStmts := fieldNames.map fun n =>
+        if frozen then
+          -- object.__setattr__(self, 'name', value)
+          Stmt.expr (Expr.call
+            (Expr.attribute (Expr.name "object" dummySpan) "__setattr__" dummySpan)
+            [Expr.name "self" dummySpan, Expr.constant (.string n) dummySpan, Expr.name n dummySpan]
+            [] dummySpan) dummySpan
+        else
+          Stmt.assign [Expr.attribute (Expr.name "self" dummySpan) n dummySpan]
+            (Expr.name n dummySpan) dummySpan
+      -- Separate defaults: only trailing fields with defaults
+      let defaults := fieldsWithDefaults.filterMap fun (_, d) => d
+      let args := Arguments.mk [] (selfArg :: paramArgs) none [] [] none
+        (defaults.map fun v => Expr.constant (valueToConstant v) dummySpan)
+      let fd := FuncData.mk "__init__" args bodyStmts defaults.toArray #[] #[] false
+      let initVal ← allocFunc fd
+      nsUpdated := nsUpdated.insert "__init__" initVal
+    -- Generate __repr__ if not already defined
+    if cd.ns["__repr__"]?.isNone then
+      -- Build synthetic __repr__: returns "ClassName(f1=v1, f2=v2)"
+      -- We build it as: return ClassName + "(" + repr(self.f1) + ", " + ... + ")"
+      let selfArg := Arg.mk "self" none dummySpan
+      let args := Arguments.mk [] [selfArg] none [] [] none []
+      -- Build f-string-like expression using string concatenation
+      let mut reprExpr : Expr := Expr.constant (.string s!"{cd.name}(") dummySpan
+      let mut fieldIdx : Nat := 0
+      for name in fieldNames do
+        let pfx := if fieldIdx > 0
+          then Expr.constant (.string s!", {name}=") dummySpan
+          else Expr.constant (.string s!"{name}=") dummySpan
+        let fieldAccess := Expr.attribute (Expr.name "self" dummySpan) name dummySpan
+        let reprCall := Expr.call (Expr.name "repr" dummySpan) [fieldAccess] [] dummySpan
+        reprExpr := Expr.binOp (Expr.binOp reprExpr .add pfx dummySpan) .add reprCall dummySpan
+        fieldIdx := fieldIdx + 1
+      reprExpr := Expr.binOp reprExpr .add (Expr.constant (.string ")") dummySpan) dummySpan
+      let bodyStmts := [Stmt.return_ (some reprExpr) dummySpan]
+      let fd := FuncData.mk "__repr__" args bodyStmts #[] #[] #[] false
+      let reprVal ← allocFunc fd
+      nsUpdated := nsUpdated.insert "__repr__" reprVal
+    -- Generate __eq__ if not already defined
+    if cd.ns["__eq__"]?.isNone then
+      -- Build synthetic __eq__: compare all fields
+      -- return self.f1 == other.f1 and self.f2 == other.f2 and ...
+      let selfArg := Arg.mk "self" none dummySpan
+      let otherArg := Arg.mk "other" none dummySpan
+      let args := Arguments.mk [] [selfArg, otherArg] none [] [] none []
+      let bodyExpr := if fieldNames.isEmpty then
+        Expr.constant .true_ dummySpan
+      else
+        let comparisons := fieldNames.map fun name =>
+          Expr.compare
+            (Expr.attribute (Expr.name "self" dummySpan) name dummySpan)
+            [(.eq, Expr.attribute (Expr.name "other" dummySpan) name dummySpan)]
+            dummySpan
+        match comparisons with
+        | [single] => single
+        | _ => Expr.boolOp .and_ comparisons dummySpan
+      let bodyStmts := [Stmt.return_ (some bodyExpr) dummySpan]
+      let fd := FuncData.mk "__eq__" args bodyStmts #[] #[] #[] false
+      let eqVal ← allocFunc fd
+      nsUpdated := nsUpdated.insert "__eq__" eqVal
+    -- Apply frozen: add __setattr__ and __delattr__ that raise
+    if frozen then
+      -- __setattr__ that raises FrozenInstanceError
+      let selfArg := Arg.mk "self" none dummySpan
+      let nameArg := Arg.mk "name" none dummySpan
+      let valueArg := Arg.mk "value" none dummySpan
+      let frozenSetArgs := Arguments.mk [] [selfArg, nameArg, valueArg] none [] [] none []
+      let frozenSetBody := [Stmt.raise_
+        (some (Expr.call (Expr.name "AttributeError" dummySpan)
+          [Expr.constant (.string "cannot assign to field") dummySpan] [] dummySpan))
+        none dummySpan]
+      let frozenSetFd := FuncData.mk "__setattr__" frozenSetArgs frozenSetBody #[] #[] #[] false
+      let frozenSetVal ← allocFunc frozenSetFd
+      nsUpdated := nsUpdated.insert "__setattr__" frozenSetVal
+      -- __delattr__ that raises
+      let delArgs := Arguments.mk [] [selfArg, nameArg] none [] [] none []
+      let frozenDelBody := [Stmt.raise_
+        (some (Expr.call (Expr.name "AttributeError" dummySpan)
+          [Expr.constant (.string "cannot delete field") dummySpan] [] dummySpan))
+        none dummySpan]
+      let frozenDelFd := FuncData.mk "__delattr__" delArgs frozenDelBody #[] #[] #[] false
+      let frozenDelVal ← allocFunc frozenDelFd
+      nsUpdated := nsUpdated.insert "__delattr__" frozenDelVal
+    -- Apply slots
+    let slotsOpt := if useSlots then some fieldNames.toArray else cd.slots
+    -- Update class data
+    heapSetClassData cref { cd with ns := nsUpdated, slots := slotsOpt }
+    return cls
+  | _ => throwTypeError "dataclass() takes a class"
 
 end
 
