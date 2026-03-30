@@ -23,6 +23,7 @@ open LeanPython.Stdlib.Time (timeTime timeMonotonic timeSleep)
 open LeanPython.Stdlib.Datetime
 open LeanPython.Stdlib.Pathlib
 open LeanPython.Stdlib.Logging
+open LeanPython.Stdlib.Pydantic
 open LeanPython.Lexer (SourceSpan SourcePos)
 
 -- ============================================================
@@ -725,6 +726,26 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             | _ => args' := args' ++ [arg]
         | other => args' := args' ++ [other]
       callBuiltin name args' kwargs
+    | "pydantic.ConfigDict" => do
+        -- ConfigDict(frozen=True, extra="forbid", ...) → dict with config values
+        let mut pairs : Array (Value × Value) := #[]
+        for (k, v) in kwargs do
+          pairs := pairs.push (.str k, v)
+        allocDict pairs
+    | "pydantic.Field" => do
+        -- Field(default=..., alias=...) → dict with field metadata
+        let mut pairs : Array (Value × Value) := #[]
+        for (k, v) in kwargs do
+          pairs := pairs.push (.str k, v)
+        allocDict pairs
+    | "pydantic.field_validator" | "pydantic.model_validator" |
+      "pydantic.field_serializer" =>
+        -- Stub: return a no-op decorator (identity function)
+        -- Full validator support will come in Phase 8C
+        return .builtin "pydantic._identity_decorator"
+    | "pydantic._identity_decorator" => match args with
+        | [fn] => return fn
+        | _ => throwTypeError "decorator takes exactly one argument"
     | "dataclass" => match args with
       | [cls@(.classObj _)] => applyDataclass cls false false
       | [] =>
@@ -1107,7 +1128,7 @@ partial def callValueDispatch (callee : Value) (args : List Value)
   | .function ref => do
     let fd ← heapGetFunc ref
     callUserFunc fd args kwargs
-  | .boundMethod receiver method => callBoundMethod receiver method args
+  | .boundMethod receiver method => callBoundMethod receiver method args kwargs
   | .classObj cref => do
     let cd ← heapGetClassData cref
     -- Step 1: Look up __new__ in MRO
@@ -1562,6 +1583,10 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
               | _ => return ← callValueDispatch getter [obj] []
             | _ => pure ()  -- not a data descriptor, continue
         | _ => pure ()
+      -- Pydantic model methods: return as bound methods
+      if cd.ns["__pydantic_model__"]? == some (.bool true) &&
+            ["model_copy", "model_dump"].contains attr then
+        return .boundMethod obj attr
       -- Check instance attributes
       if let some v := id_.attrs[attr]? then return v
       -- Then walk class MRO for non-data descriptors
@@ -2148,6 +2173,26 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "mkdtemp"            (.builtin "tempfile.mkdtemp")
     ns := ns.insert "NamedTemporaryFile" (.builtin "tempfile.NamedTemporaryFile")
     some <$> mkMod ns
+  | "pydantic" => do
+    -- Create real BaseModel class object
+    let baseModelCls ← allocClassObj {
+      name := "BaseModel", bases := #[], mro := #[], ns := {}, slots := none }
+    match baseModelCls with
+    | .classObj ref => heapSetClassData ref {
+        name := "BaseModel", bases := #[], mro := #[baseModelCls], ns := {}, slots := none }
+    | _ => pure ()
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "BaseModel" baseModelCls
+    ns := ns.insert "ConfigDict" (.builtin "pydantic.ConfigDict")
+    ns := ns.insert "Field" (.builtin "pydantic.Field")
+    ns := ns.insert "field_validator" (.builtin "pydantic.field_validator")
+    ns := ns.insert "model_validator" (.builtin "pydantic.model_validator")
+    ns := ns.insert "field_serializer" (.builtin "pydantic.field_serializer")
+    some <$> mkMod ns
+  | "pydantic.fields" => do
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "FieldInfo" (.builtin "pydantic.FieldInfo")
+    some <$> mkMod ns
   | _ => return none
 
 /-- Load a module by fully-qualified name and file path.
@@ -2505,6 +2550,12 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       let cd' ← heapGetClassData cref
       heapSetClassData cref { cd' with mro := mro }
     | _ => pure ()
+    -- Post-process Pydantic BaseModel subclasses
+    let isPydanticModel ← isBaseModelSubclass bases.toArray
+    if isPydanticModel then
+      match classVal with
+      | .classObj cref => applyPydanticModelProcessing classVal cref bases.toArray
+      | _ => pure ()
     -- Post-process enum classes: convert simple assignments to enum members
     let isEnum ← isEnumSubclass bases.toArray
     if isEnum then
@@ -2818,7 +2869,7 @@ partial def callGeneratorMethod (ref : HeapRef) (method : String)
 -- ============================================================
 
 partial def callBoundMethod (receiver : Value) (method : String) (args : List Value)
-    : InterpM Value := do
+    (kwargs : List (String × Value) := []) : InterpM Value := do
   match receiver with
   | .list ref => callListMethod ref method args
   | .dict ref => callDictMethod ref method args
@@ -2908,6 +2959,12 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
         | "__enter__" => return .instance iref
         | "__exit__" => return .none
         | _ => throwAttributeError s!"'NamedTemporaryFile' object has no attribute '{method}'"
+      -- Pydantic model methods (model_copy, model_dump)
+      if cd_.ns["__pydantic_model__"]? == some (.bool true) then
+        match method with
+        | "model_copy" => return ← callPydanticModelCopy receiver iref cref args kwargs
+        | "model_dump" => return ← callPydanticModelDump iref cref args
+        | _ => pure ()  -- fall through to normal MRO lookup
       let cd ← heapGetClassData cref
       let mut found : Option (Value × Value) := none  -- (function, defining class)
       for mroEntry in cd.mro do
@@ -3015,6 +3072,25 @@ partial def isEnumSubclass (bases : Array Value) : InterpM Bool := do
         | .classObj mref => do
           let mcd ← heapGetClassData mref
           if mcd.name == "Enum" || mcd.name == "IntEnum" then return true
+        | _ => pure ()
+    | _ => pure ()
+  return false
+
+-- ============================================================
+-- Pydantic support: check if any base class is a BaseModel
+-- ============================================================
+
+partial def isBaseModelSubclass (bases : Array Value) : InterpM Bool := do
+  for base in bases do
+    match base with
+    | .classObj ref => do
+      let cd ← heapGetClassData ref
+      if cd.name == "BaseModel" then return true
+      for mroEntry in cd.mro do
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if mcd.name == "BaseModel" then return true
         | _ => pure ()
     | _ => pure ()
   return false
@@ -3868,6 +3944,254 @@ partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
     heapSetClassData cref { cd with ns := nsUpdated, slots := slotsOpt }
     return cls
   | _ => throwTypeError "dataclass() takes a class"
+
+-- ============================================================
+-- Pydantic BaseModel processing
+-- ============================================================
+
+/-- Apply Pydantic model processing to a class that inherits from BaseModel.
+    Generates __init__, __repr__, __eq__, __hash__, model_fields, and frozen support. -/
+partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
+    (_bases : Array Value) : InterpM Unit := do
+  let cd ← heapGetClassData cref
+  -- 1. Collect inherited fields from parent BaseModel classes (MRO order)
+  let mut inheritedFields : List (String × Option Value) := []
+  let mut inheritedAnnPairs : Array (Value × Value) := #[]
+  for mroEntry in cd.mro do
+    match mroEntry with
+    | .classObj mref => do
+      if mref == cref then continue  -- skip self
+      let mcd ← heapGetClassData mref
+      if mcd.name == "BaseModel" then continue  -- skip BaseModel itself
+      if mcd.ns["__pydantic_model__"]? != some (.bool true) then continue
+      -- Get field names from parent's __pydantic_field_names__
+      match mcd.ns["__pydantic_field_names__"]? with
+      | some (.list fnRef) => do
+        let fnArr ← heapGetList fnRef
+        for fv in fnArr do
+          match fv with
+          | .str fname =>
+            if !(inheritedFields.any fun (n, _) => n == fname) then
+              inheritedFields := inheritedFields ++ [(fname, mcd.ns[fname]?)]
+              inheritedAnnPairs := inheritedAnnPairs.push (.str fname, .str "Any")
+          | _ => pure ()
+      | _ => pure ()
+    | _ => pure ()
+  -- 2. Read own __annotations__
+  let ownFieldNames ← match cd.ns["__annotations__"]? with
+    | some (.dict annRef) => do
+      let pairs ← heapGetDict annRef
+      pure (pairs.map fun (k, _) =>
+        match k with | .str s => s | _ => "").toList
+    | _ => pure ([] : List String)
+  -- 3. Merge: inherited fields first, then own fields (own overrides inherited)
+  let mut allFields : List (String × Option Value) := []
+  for (name, defVal) in inheritedFields do
+    if !(ownFieldNames.contains name) then
+      allFields := allFields ++ [(name, defVal)]
+  for name in ownFieldNames do
+    allFields := allFields ++ [(name, cd.ns[name]?)]
+  let allFieldNames := allFields.map Prod.fst
+  -- 4. Parse model_config
+  let config ← match cd.ns["model_config"]? with
+    | some (.dict configRef) => do
+      let pairs ← heapGetDict configRef
+      pure (parsePydanticConfigFromPairs pairs)
+    | _ => pure ({} : PydanticConfig)
+  -- 5. Build namespace updates
+  let mut nsUpdated := cd.ns
+  -- Mark as Pydantic model
+  nsUpdated := nsUpdated.insert "__pydantic_model__" (.bool true)
+  -- Store field names list for inheritance and model_copy/model_dump
+  let fnArr := allFieldNames.map (fun n => Value.str n) |>.toArray
+  let fnRef ← heapAlloc (.listObj fnArr)
+  nsUpdated := nsUpdated.insert "__pydantic_field_names__" (.list fnRef)
+  -- Store config
+  nsUpdated := nsUpdated.insert "__pydantic_frozen__" (.bool config.frozen)
+  nsUpdated := nsUpdated.insert "__pydantic_extra__" (.str config.extra)
+  -- 6. Build model_fields dict: {field_name: {"annotation": ..., "default": ...}}
+  let mut mfPairs : Array (Value × Value) := #[]
+  for (name, defVal) in allFields do
+    let mut infoPairs : Array (Value × Value) := #[]
+    infoPairs := infoPairs.push (.str "annotation", .str "Any")
+    match defVal with
+    | some v => infoPairs := infoPairs.push (.str "default", v)
+    | none => pure ()
+    let infoDict ← allocDict infoPairs
+    mfPairs := mfPairs.push (.str name, infoDict)
+  let mfDict ← allocDict mfPairs
+  nsUpdated := nsUpdated.insert "model_fields" mfDict
+  -- 7. Merge own annotations with inherited for full __annotations__ dict
+  let mut fullAnnPairs := inheritedAnnPairs
+  match cd.ns["__annotations__"]? with
+  | some (.dict annRef) => do
+    let pairs ← heapGetDict annRef
+    for p in pairs do fullAnnPairs := fullAnnPairs.push p
+  | _ => pure ()
+  let fullAnnRef ← heapAlloc (.dictObj fullAnnPairs)
+  nsUpdated := nsUpdated.insert "__annotations__" (.dict fullAnnRef)
+  -- 8. Generate __init__ if not already defined
+  if cd.ns["__init__"]?.isNone then
+    let selfArg := Arg.mk "self" none dummySpan
+    let paramArgs := allFieldNames.map fun n => Arg.mk n none dummySpan
+    -- Always use object.__setattr__ for Pydantic (compatible with frozen)
+    let bodyStmts := allFieldNames.map fun n =>
+      Stmt.expr (Expr.call
+        (Expr.attribute (Expr.name "object" dummySpan) "__setattr__" dummySpan)
+        [Expr.name "self" dummySpan, Expr.constant (.string n) dummySpan, Expr.name n dummySpan]
+        [] dummySpan) dummySpan
+    let fieldsWithDefaults := allFields.filterMap fun (_, d) => d
+    let args := Arguments.mk [] (selfArg :: paramArgs) none [] [] none
+      (fieldsWithDefaults.map fun v => Expr.constant (valueToConstant v) dummySpan)
+    let fd := FuncData.mk "__init__" args bodyStmts fieldsWithDefaults.toArray #[] #[] false
+    let initVal ← allocFunc fd
+    nsUpdated := nsUpdated.insert "__init__" initVal
+  -- 9. Generate __repr__ if not already defined
+  if cd.ns["__repr__"]?.isNone then
+    let selfArg := Arg.mk "self" none dummySpan
+    let args := Arguments.mk [] [selfArg] none [] [] none []
+    let mut reprExpr : Expr := Expr.constant (.string s!"{cd.name}(") dummySpan
+    let mut fieldIdx : Nat := 0
+    for name in allFieldNames do
+      let pfx := if fieldIdx > 0
+        then Expr.constant (.string s!", {name}=") dummySpan
+        else Expr.constant (.string s!"{name}=") dummySpan
+      let fieldAccess := Expr.attribute (Expr.name "self" dummySpan) name dummySpan
+      let reprCall := Expr.call (Expr.name "repr" dummySpan) [fieldAccess] [] dummySpan
+      reprExpr := Expr.binOp (Expr.binOp reprExpr .add pfx dummySpan) .add reprCall dummySpan
+      fieldIdx := fieldIdx + 1
+    reprExpr := Expr.binOp reprExpr .add (Expr.constant (.string ")") dummySpan) dummySpan
+    let bodyStmts := [Stmt.return_ (some reprExpr) dummySpan]
+    let fd := FuncData.mk "__repr__" args bodyStmts #[] #[] #[] false
+    let reprVal ← allocFunc fd
+    nsUpdated := nsUpdated.insert "__repr__" reprVal
+  -- 10. Generate __eq__ if not already defined
+  if cd.ns["__eq__"]?.isNone then
+    let selfArg := Arg.mk "self" none dummySpan
+    let otherArg := Arg.mk "other" none dummySpan
+    let args := Arguments.mk [] [selfArg, otherArg] none [] [] none []
+    let bodyExpr := if allFieldNames.isEmpty then
+      Expr.constant .true_ dummySpan
+    else
+      let comparisons := allFieldNames.map fun name =>
+        Expr.compare
+          (Expr.attribute (Expr.name "self" dummySpan) name dummySpan)
+          [(.eq, Expr.attribute (Expr.name "other" dummySpan) name dummySpan)]
+          dummySpan
+      match comparisons with
+      | [single] => single
+      | _ => Expr.boolOp .and_ comparisons dummySpan
+    let bodyStmts := [Stmt.return_ (some bodyExpr) dummySpan]
+    let fd := FuncData.mk "__eq__" args bodyStmts #[] #[] #[] false
+    let eqVal ← allocFunc fd
+    nsUpdated := nsUpdated.insert "__eq__" eqVal
+  -- 11. Generate __hash__ for frozen models
+  if config.frozen && cd.ns["__hash__"]?.isNone then
+    -- __hash__: return hash(tuple(self.f1, self.f2, ...))
+    let selfArg := Arg.mk "self" none dummySpan
+    let args := Arguments.mk [] [selfArg] none [] [] none []
+    let fieldExprs := allFieldNames.map fun name =>
+      Expr.attribute (Expr.name "self" dummySpan) name dummySpan
+    let tupleExpr := Expr.tuple fieldExprs dummySpan
+    let hashExpr := Expr.call (Expr.name "hash" dummySpan) [tupleExpr] [] dummySpan
+    let bodyStmts := [Stmt.return_ (some hashExpr) dummySpan]
+    let fd := FuncData.mk "__hash__" args bodyStmts #[] #[] #[] false
+    let hashVal ← allocFunc fd
+    nsUpdated := nsUpdated.insert "__hash__" hashVal
+  -- 12. Apply frozen: add __setattr__ and __delattr__ that raise
+  if config.frozen then
+    let selfArg := Arg.mk "self" none dummySpan
+    let nameArg := Arg.mk "name" none dummySpan
+    let valueArg := Arg.mk "value" none dummySpan
+    let frozenSetArgs := Arguments.mk [] [selfArg, nameArg, valueArg] none [] [] none []
+    let frozenSetBody := [Stmt.raise_
+      (some (Expr.call (Expr.name "AttributeError" dummySpan)
+        [Expr.constant (.string "Instance is frozen") dummySpan] [] dummySpan))
+      none dummySpan]
+    let frozenSetFd := FuncData.mk "__setattr__" frozenSetArgs frozenSetBody #[] #[] #[] false
+    let frozenSetVal ← allocFunc frozenSetFd
+    nsUpdated := nsUpdated.insert "__setattr__" frozenSetVal
+    let delArgs := Arguments.mk [] [selfArg, nameArg] none [] [] none []
+    let frozenDelBody := [Stmt.raise_
+      (some (Expr.call (Expr.name "AttributeError" dummySpan)
+        [Expr.constant (.string "Instance is frozen") dummySpan] [] dummySpan))
+      none dummySpan]
+    let frozenDelFd := FuncData.mk "__delattr__" delArgs frozenDelBody #[] #[] #[] false
+    let frozenDelVal ← allocFunc frozenDelFd
+    nsUpdated := nsUpdated.insert "__delattr__" frozenDelVal
+  -- 13. Update the class data
+  heapSetClassData cref { cd with ns := nsUpdated }
+
+-- ============================================================
+-- Pydantic model_copy: create a new instance with updated fields
+-- ============================================================
+
+/-- model_copy(update={...}) — immutable copy with field updates. -/
+partial def callPydanticModelCopy (_receiver : Value) (iref : HeapRef) (cref : HeapRef)
+    (args : List Value) (kwargs : List (String × Value)) : InterpM Value := do
+  let id_ ← heapGetInstanceData iref
+  let cd ← heapGetClassData cref
+  -- Get field names
+  let fieldNames ← match cd.ns["__pydantic_field_names__"]? with
+    | some (.list fnRef) => do
+      let fnArr ← heapGetList fnRef
+      pure (fnArr.toList.filterMap fun v => match v with | .str s => some s | _ => none)
+    | _ => pure ([] : List String)
+  -- Parse update dict: check kwargs first (update=...), then positional args
+  let updateDict ← do
+    -- Check keyword arg "update"
+    let kw := kwargs.find? fun (k, _) => k == "update"
+    match kw with
+    | some (_, .dict dref) => do
+      let pairs ← heapGetDict dref
+      pure (pairs.toList.filterMap fun (k, v) =>
+        match k with | .str s => some (s, v) | _ => none)
+    | some _ => throwTypeError "update must be a dict"
+    | none => match args with
+      | [] => pure ([] : List (String × Value))
+      | [.dict dref] => do
+        let pairs ← heapGetDict dref
+        pure (pairs.toList.filterMap fun (k, v) =>
+          match k with | .str s => some (s, v) | _ => none)
+      | _ => throwTypeError "model_copy() takes 0 or 1 positional argument (update dict)"
+  -- Build new attrs: copy all fields, then apply updates
+  let mut newAttrs : Std.HashMap String Value := {}
+  for name in fieldNames do
+    match updateDict.find? (fun (k, _) => k == name) with
+    | some (_, v) => newAttrs := newAttrs.insert name v
+    | none =>
+      match id_.attrs[name]? with
+      | some v => newAttrs := newAttrs.insert name v
+      | none => pure ()
+  -- Copy non-field attrs too
+  for (k, v) in id_.attrs do
+    if newAttrs[k]?.isNone then
+      newAttrs := newAttrs.insert k v
+  -- Allocate new instance directly (bypassing __init__ and frozen __setattr__)
+  allocInstance { cls := id_.cls, attrs := newAttrs }
+
+-- ============================================================
+-- Pydantic model_dump: serialize instance to dict
+-- ============================================================
+
+/-- model_dump(mode="python") — serialize to dict. -/
+partial def callPydanticModelDump (iref : HeapRef) (cref : HeapRef)
+    (_args : List Value) : InterpM Value := do
+  let id_ ← heapGetInstanceData iref
+  let cd ← heapGetClassData cref
+  -- Get field names
+  let fieldNames ← match cd.ns["__pydantic_field_names__"]? with
+    | some (.list fnRef) => do
+      let fnArr ← heapGetList fnRef
+      pure (fnArr.toList.filterMap fun v => match v with | .str s => some s | _ => none)
+    | _ => pure ([] : List String)
+  -- Build dict from field values
+  let mut pairs : Array (Value × Value) := #[]
+  for name in fieldNames do
+    match id_.attrs[name]? with
+    | some v => pairs := pairs.push (.str name, v)
+    | none => pure ()
+  allocDict pairs
 
 end
 

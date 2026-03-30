@@ -624,3 +624,37 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- NamedTemporaryFile has name attribute
 #eval assertPy "import tempfile\nf = tempfile.NamedTemporaryFile()\nprint(type(f.name))" "<class 'str'>\n"
+
+-- ============================================================
+-- pydantic module tests
+-- ============================================================
+
+-- Basic model definition and field access
+#eval assertPy "from pydantic import BaseModel\nclass Point(BaseModel):\n    x: int\n    y: int\np = Point(x=1, y=2)\nprint(p.x)\nprint(p.y)" "1\n2\n"
+
+-- __repr__
+#eval assertPy "from pydantic import BaseModel\nclass Point(BaseModel):\n    x: int\n    y: int\np = Point(x=1, y=2)\nprint(repr(p))" "Point(x=1, y=2)\n"
+
+-- __eq__
+#eval assertPy "from pydantic import BaseModel\nclass Point(BaseModel):\n    x: int\n    y: int\nprint(Point(x=1, y=2) == Point(x=1, y=2))\nprint(Point(x=1, y=2) == Point(x=1, y=3))" "True\nFalse\n"
+
+-- Frozen model via ConfigDict
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nclass Frozen(BaseModel):\n    model_config = ConfigDict(frozen=True)\n    x: int\nf = Frozen(x=5)\nprint(f.x)" "5\n"
+
+-- model_copy with update kwarg
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nclass State(BaseModel):\n    model_config = ConfigDict(frozen=True)\n    slot: int\n    balance: int\ns = State(slot=0, balance=100)\ns2 = s.model_copy(update={'slot': 1})\nprint(s2.slot)\nprint(s2.balance)" "1\n100\n"
+
+-- model_dump
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nclass Frozen(BaseModel):\n    model_config = ConfigDict(frozen=True)\n    x: int\nf = Frozen(x=5)\nd = f.model_dump()\nprint(d['x'])" "5\n"
+
+-- model_fields class attribute
+#eval assertPy "from pydantic import BaseModel\nclass Point(BaseModel):\n    x: int\n    y: int\nprint('x' in Point.model_fields)\nprint('z' in Point.model_fields)" "True\nFalse\n"
+
+-- Field defaults
+#eval assertPy "from pydantic import BaseModel\nclass WithDefault(BaseModel):\n    x: int\n    y: int = 42\nw = WithDefault(x=1)\nprint(w.x)\nprint(w.y)" "1\n42\n"
+
+-- Inheritance: child inherits parent fields
+#eval assertPy "from pydantic import BaseModel\nclass Base(BaseModel):\n    x: int\nclass Child(Base):\n    y: int\nc = Child(x=1, y=2)\nprint(c.x)\nprint(c.y)" "1\n2\n"
+
+-- __hash__ for frozen models
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nclass Frozen(BaseModel):\n    model_config = ConfigDict(frozen=True)\n    x: int\nf = Frozen(x=5)\nprint(type(hash(f)))" "<class 'int'>\n"
