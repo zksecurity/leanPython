@@ -369,3 +369,70 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- from json import
 #eval assertPy "from json import dumps, loads\nprint(loads(dumps([1, 2]))[1])" "2\n"
+
+-- ============================================================
+-- hashlib module tests
+-- ============================================================
+
+-- sha256 empty string
+#eval assertPy "import hashlib\nprint(hashlib.sha256(b'').hexdigest())" "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n"
+
+-- sha256 'abc' (NIST test vector)
+#eval assertPy "import hashlib\nprint(hashlib.sha256(b'abc').hexdigest())" "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n"
+
+-- sha256 'hello'
+#eval assertPy "import hashlib\nprint(hashlib.sha256(b'hello').hexdigest())" "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
+
+-- sha256 incremental update equals one-shot
+#eval assertPy "import hashlib\nh = hashlib.sha256()\nh.update(b'hel')\nh.update(b'lo')\nprint(h.hexdigest())" "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
+
+-- sha256 digest returns 32 bytes
+#eval assertPy "import hashlib\nprint(len(hashlib.sha256(b'hello').digest()))" "32\n"
+
+-- sha256 digest_size attribute
+#eval assertPy "import hashlib\nprint(hashlib.sha256().digest_size)" "32\n"
+
+-- sha256 name attribute
+#eval assertPy "import hashlib\nprint(hashlib.sha256().name)" "sha256\n"
+
+-- sha256 multi-block input (NIST 'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq')
+#eval assertPy "import hashlib\nprint(hashlib.sha256(b'abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq').hexdigest())" "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1\n"
+
+-- hashlib.new generic constructor
+#eval assertPy "import hashlib\nh = hashlib.new('sha256', b'hello')\nprint(h.hexdigest())" "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824\n"
+
+-- from hashlib import
+#eval assertPy "from hashlib import sha256\nprint(sha256(b'test').hexdigest())" "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08\n"
+
+-- ============================================================
+-- shake_128 tests
+-- ============================================================
+
+-- shake_128 output length
+#eval assertPy "import hashlib\nh = hashlib.shake_128(b'hello')\nresult = h.digest(16)\nprint(len(result))" "16\n"
+
+-- shake_128 output length 32
+#eval assertPy "import hashlib\nresult = hashlib.shake_128(b'').digest(32)\nprint(len(result))" "32\n"
+
+-- ============================================================
+-- hmac module tests
+-- ============================================================
+
+-- hmac.new with sha256 - RFC 4231 Test Case 2
+#eval assertPy "import hmac\nimport hashlib\nresult = hmac.new(b'Jefe', b'what do ya want for nothing?', hashlib.sha256).hexdigest()\nprint(result)" "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843\n"
+
+-- hmac digest length
+#eval assertPy "import hmac\nimport hashlib\nresult = hmac.new(b'key', b'message', hashlib.sha256).digest()\nprint(len(result))" "32\n"
+
+-- ============================================================
+-- secrets module tests
+-- ============================================================
+
+-- secrets.token_bytes returns bytes of correct length
+#eval assertPy "import secrets\nresult = secrets.token_bytes(32)\nprint(len(result))\nprint(type(result))" "32\n<class 'bytes'>\n"
+
+-- secrets.token_bytes default length
+#eval assertPy "import secrets\nresult = secrets.token_bytes()\nprint(len(result))" "32\n"
+
+-- secrets.randbelow returns int in range
+#eval assertPy "import secrets\nfor _ in range(10):\n    x = secrets.randbelow(100)\n    assert 0 <= x < 100\nprint('ok')" "ok\n"

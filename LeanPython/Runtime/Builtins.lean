@@ -5,6 +5,9 @@ import LeanPython.Stdlib.IO
 import LeanPython.Stdlib.Bisect
 import LeanPython.Stdlib.Base64
 import LeanPython.Stdlib.Json
+import LeanPython.Stdlib.Hashlib
+import LeanPython.Stdlib.Hmac
+import LeanPython.Stdlib.Secrets
 
 set_option autoImplicit false
 
@@ -18,6 +21,9 @@ open LeanPython.Stdlib.Struct
 open LeanPython.Stdlib.Bisect
 open LeanPython.Stdlib.Base64
 open LeanPython.Stdlib.Json
+open LeanPython.Stdlib.Hashlib
+open LeanPython.Stdlib.Hmac
+open LeanPython.Stdlib.Secrets
 
 -- ============================================================
 -- Individual builtin implementations

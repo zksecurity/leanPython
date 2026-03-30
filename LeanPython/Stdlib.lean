@@ -4,3 +4,6 @@ import LeanPython.Stdlib.IO
 import LeanPython.Stdlib.Bisect
 import LeanPython.Stdlib.Base64
 import LeanPython.Stdlib.Json
+import LeanPython.Stdlib.Hashlib
+import LeanPython.Stdlib.Hmac
+import LeanPython.Stdlib.Secrets

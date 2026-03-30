@@ -14,6 +14,9 @@ open LeanPython.Runtime.Builtins
 open LeanPython.Interpreter
 open LeanPython.Parser (parse)
 open LeanPython.Stdlib.IO
+open LeanPython.Stdlib.Hashlib
+open LeanPython.Stdlib.Hmac
+open LeanPython.Stdlib.Secrets
 open LeanPython.Lexer (SourceSpan SourcePos)
 
 -- ============================================================
@@ -759,6 +762,91 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         | _ => pure ()
         let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
         return .instance instRef
+      else if name == "hashlib.sha256" then do
+        let initBuf := match args with
+          | [.bytes b] => b
+          | [] => ByteArray.empty
+          | _ => ByteArray.empty
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_buffer" (.bytes initBuf)
+        attrs := attrs.insert "_name" (.str "sha256")
+        attrs := attrs.insert "_digest_size" (.int 32)
+        attrs := attrs.insert "_is_shake" (.bool false)
+        attrs := attrs.insert "digest_size" (.int 32)
+        attrs := attrs.insert "block_size" (.int 64)
+        attrs := attrs.insert "name" (.str "sha256")
+        let cls ← allocClassObj {
+          name := "SHA256Hash", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "SHA256Hash", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "hashlib.shake_128" then do
+        let initBuf := match args with
+          | [.bytes b] => b
+          | [] => ByteArray.empty
+          | _ => ByteArray.empty
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_buffer" (.bytes initBuf)
+        attrs := attrs.insert "_name" (.str "shake_128")
+        attrs := attrs.insert "_digest_size" (.int 0)
+        attrs := attrs.insert "_is_shake" (.bool true)
+        attrs := attrs.insert "digest_size" (.int 0)
+        attrs := attrs.insert "block_size" (.int 168)
+        attrs := attrs.insert "name" (.str "shake_128")
+        let cls ← allocClassObj {
+          name := "SHAKE128Hash", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "SHAKE128Hash", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "hashlib.new" then do
+        match args with
+        | (.str algoName) :: rest =>
+          let data := match rest with
+            | [.bytes b] => b
+            | _ => ByteArray.empty
+          let targetName := match algoName with
+            | "sha256" => "hashlib.sha256"
+            | "shake_128" => "hashlib.shake_128"
+            | _ => ""
+          if targetName == "" then
+            throwValueError s!"unsupported hash type {algoName}"
+          else
+            callValueDispatch (.builtin targetName) [.bytes data] kwargs
+        | _ => throwTypeError "hashlib.new() requires algorithm name as first argument"
+      else if name == "hmac.new" then do
+        let key := match args with
+          | (.bytes k) :: _ => k
+          | _ => ByteArray.empty
+        let msg := match args with
+          | _ :: (.bytes m) :: _ => m
+          | _ => ByteArray.empty
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_key" (.bytes key)
+        attrs := attrs.insert "_msg" (.bytes msg)
+        attrs := attrs.insert "_digestmod" (.str "sha256")
+        let cls ← allocClassObj {
+          name := "HMAC", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "HMAC", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "hmac.digest" then do
+        match args with
+        | [.bytes key, .bytes msg, _] =>
+          return .bytes (hmacSha256 key msg)
+        | _ => throwTypeError "hmac.digest() requires (key, msg, digest)"
+      else if name == "secrets.token_bytes" then
+        tokenBytes args
+      else if name == "secrets.randbelow" then
+        randbelow args
       else
         callBuiltin name args kwargs
   | .function ref => do
@@ -1095,6 +1183,15 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
         | _ => pure ()
       if cd.name == "StringIO" && ["write", "read", "getvalue", "seek", "tell",
             "__enter__", "__exit__", "close"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if (cd.name == "SHA256Hash" || cd.name == "SHAKE128Hash") &&
+            ["update", "digest", "hexdigest", "copy"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "HMAC" && ["update", "digest", "hexdigest", "copy"].contains attr then
         match obj with
         | .instance _ => return .boundMethod obj attr
         | _ => pure ()
@@ -1555,6 +1652,22 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     for n in ["compile", "match", "search", "sub", "findall", "split",
               "IGNORECASE", "MULTILINE", "DOTALL", "VERBOSE"] do
       ns := ns.insert n (.builtin s!"re.{n}")
+    some <$> mkMod ns
+  | "hashlib" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "sha256"    (.builtin "hashlib.sha256")
+    ns := ns.insert "shake_128" (.builtin "hashlib.shake_128")
+    ns := ns.insert "new"       (.builtin "hashlib.new")
+    some <$> mkMod ns
+  | "hmac" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "new"    (.builtin "hmac.new")
+    ns := ns.insert "digest" (.builtin "hmac.digest")
+    some <$> mkMod ns
+  | "secrets" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "token_bytes" (.builtin "secrets.token_bytes")
+    ns := ns.insert "randbelow"   (.builtin "secrets.randbelow")
     some <$> mkMod ns
   | _ => return none
 
@@ -2282,6 +2395,9 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
       let cd_ ← heapGetClassData cref
       if cd_.name == "BytesIO" then return ← callBytesIOMethod iref method args
       if cd_.name == "StringIO" then return ← callStringIOMethod iref method args
+      if cd_.name == "SHA256Hash" || cd_.name == "SHAKE128Hash" then
+        return ← callHashMethod iref method args
+      if cd_.name == "HMAC" then return ← callHmacMethod iref method args
       let cd ← heapGetClassData cref
       let mut found : Option (Value × Value) := none  -- (function, defining class)
       for mroEntry in cd.mro do

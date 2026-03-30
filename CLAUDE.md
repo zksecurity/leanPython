@@ -53,6 +53,9 @@ LeanPython/
     Bisect.lean      — bisect_left/bisect_right/insort (binary search)
     Base64.lean      — b64encode/decode, b16encode/decode, urlsafe variants
     Json.lean        — json.dumps (serializer) and json.loads (parser)
+    Hashlib.lean     — hashlib: SHA-256, SHAKE-128 (pure Lean4), hash object dispatch
+    Hmac.lean        — hmac: HMAC-SHA256, HMAC object dispatch
+    Secrets.lean     — secrets: token_bytes, randbelow (using IO.rand)
 Main.lean            — CLI entry point (reads .py file, parses, interprets)
 LeanPythonTest.lean      — test driver root
 LeanPythonTest/
