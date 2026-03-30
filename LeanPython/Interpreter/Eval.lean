@@ -571,6 +571,52 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     match name with
     | "map" => builtinMap args
     | "filter" => builtinFilter args
+    | "functools.reduce" => builtinFunctoolsReduce args
+    | "itertools.accumulate" => builtinItertoolsAccumulate args kwargs
+    | "collections.defaultdict" => do
+      -- defaultdict(factory) or defaultdict(factory, pairs)
+      let (factory, initPairs) ← match args with
+        | [] => pure (Value.none, #[])
+        | [f] => pure (f, #[])
+        | [f, init] => do
+          let items ← iterValues init
+          let mut pairs : Array (Value × Value) := #[]
+          for item in items do
+            let kv ← iterValues item
+            if kv.size >= 2 then pairs := pairs.push (kv[0]!, kv[1]!)
+          pure (f, pairs)
+        | _ => throwTypeError "defaultdict() takes at most 2 positional arguments"
+      let mut pairs := initPairs
+      for (k, v) in kwargs do
+        pairs := pairs.push (.str k, v)
+      let dictRef ← heapAlloc (.dictObj pairs)
+      -- Register factory for this dict ref
+      modify fun st => { st with defaultFactories := st.defaultFactories.insert dictRef factory }
+      return .dict dictRef
+    | "collections.OrderedDict" => do
+      -- OrderedDict is just a dict (Python 3.7+ dicts preserve order)
+      let mut pairs : Array (Value × Value) := #[]
+      for (k, v) in kwargs do
+        pairs := pairs.push (.str k, v)
+      allocDict pairs
+    | "collections.deque" => do
+      -- deque(iterable) — create a list from iterable
+      match args with
+      | [] => allocList #[]
+      | [iter] => do
+        let items ← iterValues iter
+        allocList items
+      | _ => throwTypeError "deque() takes at most 1 argument"
+    | "operator.itemgetter" => do
+      -- itemgetter(key) returns a callable
+      match args with
+      | [.str key] => return .builtin s!"operator.itemgetter_s:{key}"
+      | [.int key] => return .builtin s!"operator.itemgetter_i:{key}"
+      | _ => throwTypeError "operator.itemgetter() requires a string or int key"
+    | "operator.attrgetter" => do
+      match args with
+      | [.str name] => return .builtin s!"operator.attrgetter_inst:{name}"
+      | _ => throwTypeError "operator.attrgetter() requires a string argument"
     | "hasattr" => builtinHasattr args
     | "getattr" => builtinGetattr args
     | "setattr" => builtinSetattr args
@@ -660,7 +706,26 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     | "dataclass_slots" => match args with
       | [cls@(.classObj _)] => applyDataclass cls false true
       | _ => throwTypeError "dataclass() takes a class"
-    | _ => callBuiltin name args kwargs
+    | _ =>
+      -- Handle prefix-matched builtins (operator.itemgetter instances, etc.)
+      if name.startsWith "operator.itemgetter_s:" then do
+        let key := String.ofList (name.toList.drop "operator.itemgetter_s:".length)
+        match args with
+        | [obj] => evalSubscriptValue obj (.str key)
+        | _ => throwTypeError "itemgetter object takes exactly 1 argument"
+      else if name.startsWith "operator.itemgetter_i:" then do
+        let keyStr := String.ofList (name.toList.drop "operator.itemgetter_i:".length)
+        let key := keyStr.toInt?.getD 0
+        match args with
+        | [obj] => evalSubscriptValue obj (.int key)
+        | _ => throwTypeError "itemgetter object takes exactly 1 argument"
+      else if name.startsWith "operator.attrgetter_inst:" then do
+        let attrName := String.ofList (name.toList.drop "operator.attrgetter_inst:".length)
+        match args with
+        | [obj] => getAttributeValue obj attrName
+        | _ => throwTypeError "attrgetter object takes exactly 1 argument"
+      else
+        callBuiltin name args kwargs
   | .function ref => do
     let fd ← heapGetFunc ref
     callUserFunc fd args kwargs
@@ -1088,6 +1153,13 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
     let pairs ← heapGetDict ref
     for (k, v) in pairs do
       if ← valueEq k idx then return v
+    -- Check if this dict has a default factory (collections.defaultdict)
+    let st ← get
+    if let some factory := st.defaultFactories[ref]? then
+      if !Value.beq factory .none then
+        let defaultVal ← callValueDispatch factory [] []
+        heapSetDict ref (pairs.push (idx, defaultVal))
+        return defaultVal
     throwKeyError (← valueRepr idx)
   | .bytes b =>
     match idx with
@@ -1272,10 +1344,11 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
   | "typing" =>
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "TYPE_CHECKING" (.bool false)
+    ns := ns.insert "get_type_hints" (.builtin "typing.get_type_hints")
     -- Stub common typing names as none so imports don't fail
     for n in ["Any", "Optional", "List", "Dict", "Set", "Tuple", "FrozenSet",
               "ClassVar", "Final", "Self", "Union", "Callable", "Protocol",
-              "runtime_checkable", "NamedTuple", "get_type_hints",
+              "runtime_checkable", "NamedTuple",
               "override", "NoReturn", "SupportsInt", "SupportsIndex",
               "TypeAlias", "Literal", "IO", "Sequence", "Mapping",
               "Iterator", "Iterable", "Generator", "Coroutine",
@@ -1292,29 +1365,110 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
               "Annotated", "TypeAlias", "get_type_hints"] do
       ns := ns.insert n .none
     some <$> mkMod ns
-  | "abc" =>
+  | "abc" => do
+    -- Create real ABC base class
+    let abcCls ← allocClassObj {
+      name := "ABC", bases := #[], mro := #[], ns := {}, slots := none }
+    match abcCls with
+    | .classObj ref => heapSetClassData ref {
+        name := "ABC", bases := #[], mro := #[abcCls], ns := {}, slots := none }
+    | _ => pure ()
     let mut ns : Std.HashMap String Value := {}
-    ns := ns.insert "ABC" .none
-    ns := ns.insert "abstractmethod" .none
+    ns := ns.insert "ABC" abcCls
+    ns := ns.insert "abstractmethod" (.builtin "abc.abstractmethod")
     ns := ns.insert "ABCMeta" .none
     some <$> mkMod ns
   | "dataclasses" =>
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "dataclass" (.builtin "dataclass")
-    ns := ns.insert "field" .none
-    ns := ns.insert "fields" .none
+    ns := ns.insert "field" (.builtin "dataclasses.field")
+    ns := ns.insert "fields" (.builtin "dataclasses.fields")
     some <$> mkMod ns
   | "functools" =>
     let mut ns : Std.HashMap String Value := {}
-    for n in ["singledispatch", "lru_cache", "reduce", "wraps",
-              "partial", "cached_property", "total_ordering"] do
-      ns := ns.insert n .none
+    ns := ns.insert "singledispatch" (.builtin "functools.singledispatch")
+    ns := ns.insert "lru_cache"      (.builtin "functools.lru_cache")
+    ns := ns.insert "reduce"         (.builtin "functools.reduce")
+    ns := ns.insert "wraps"          (.builtin "functools.wraps")
+    ns := ns.insert "partial"        (.builtin "functools.partial")
+    ns := ns.insert "cached_property" (.builtin "functools.cached_property")
+    ns := ns.insert "total_ordering" (.builtin "functools.total_ordering")
     some <$> mkMod ns
-  | "enum" =>
+  | "enum" => do
+    -- Create real Enum class
+    let enumCls ← allocClassObj {
+      name := "Enum", bases := #[], mro := #[], ns := {}, slots := none }
+    -- Create IntEnum class (subclass of Enum)
+    let intEnumCls ← allocClassObj {
+      name := "IntEnum", bases := #[enumCls], mro := #[enumCls], ns := {}, slots := none }
+    -- Fix MRO to include self
+    match enumCls with
+    | .classObj ref => heapSetClassData ref {
+        name := "Enum", bases := #[], mro := #[enumCls], ns := {}, slots := none }
+    | _ => pure ()
+    match intEnumCls with
+    | .classObj ref => heapSetClassData ref {
+        name := "IntEnum", bases := #[enumCls], mro := #[intEnumCls, enumCls], ns := {}, slots := none }
+    | _ => pure ()
     let mut ns : Std.HashMap String Value := {}
-    ns := ns.insert "Enum" .none
-    ns := ns.insert "IntEnum" .none
-    ns := ns.insert "auto" .none
+    ns := ns.insert "Enum" enumCls
+    ns := ns.insert "IntEnum" intEnumCls
+    ns := ns.insert "auto" (.builtin "enum.auto")
+    some <$> mkMod ns
+  | "math" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "ceil"  (.builtin "math.ceil")
+    ns := ns.insert "floor" (.builtin "math.floor")
+    ns := ns.insert "sqrt"  (.builtin "math.sqrt")
+    ns := ns.insert "log"   (.builtin "math.log")
+    ns := ns.insert "log2"  (.builtin "math.log2")
+    ns := ns.insert "fabs"  (.builtin "math.fabs")
+    ns := ns.insert "isnan" (.builtin "math.isnan")
+    ns := ns.insert "isinf" (.builtin "math.isinf")
+    ns := ns.insert "inf"   (.float (1.0 / 0.0))
+    ns := ns.insert "nan"   (.float (0.0 / 0.0))
+    ns := ns.insert "pi"    (.float 3.141592653589793)
+    ns := ns.insert "e"     (.float 2.718281828459045)
+    some <$> mkMod ns
+  | "copy" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "copy"     (.builtin "copy.copy")
+    ns := ns.insert "deepcopy" (.builtin "copy.deepcopy")
+    some <$> mkMod ns
+  | "operator" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "itemgetter" (.builtin "operator.itemgetter")
+    ns := ns.insert "attrgetter" (.builtin "operator.attrgetter")
+    ns := ns.insert "add" (.builtin "operator.add")
+    ns := ns.insert "sub" (.builtin "operator.sub")
+    ns := ns.insert "mul" (.builtin "operator.mul")
+    ns := ns.insert "eq"  (.builtin "operator.eq")
+    ns := ns.insert "ne"  (.builtin "operator.ne")
+    ns := ns.insert "lt"  (.builtin "operator.lt")
+    ns := ns.insert "le"  (.builtin "operator.le")
+    ns := ns.insert "gt"  (.builtin "operator.gt")
+    ns := ns.insert "ge"  (.builtin "operator.ge")
+    ns := ns.insert "neg" (.builtin "operator.neg")
+    ns := ns.insert "not_" (.builtin "operator.not_")
+    some <$> mkMod ns
+  | "itertools" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "chain"      (.builtin "itertools.chain")
+    ns := ns.insert "accumulate" (.builtin "itertools.accumulate")
+    ns := ns.insert "count"      (.builtin "itertools.count")
+    some <$> mkMod ns
+  | "collections" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "defaultdict" (.builtin "collections.defaultdict")
+    ns := ns.insert "OrderedDict" (.builtin "collections.OrderedDict")
+    ns := ns.insert "deque"       (.builtin "collections.deque")
+    some <$> mkMod ns
+  | "collections.abc" =>
+    let mut ns : Std.HashMap String Value := {}
+    for n in ["Iterable", "Iterator", "Mapping", "Sequence", "Set",
+              "MutableMapping", "MutableSequence", "MutableSet",
+              "Callable", "Hashable", "Sized", "Container"] do
+      ns := ns.insert n .none
     some <$> mkMod ns
   | _ => return none
 
@@ -1673,6 +1827,42 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       let cd' ← heapGetClassData cref
       heapSetClassData cref { cd' with mro := mro }
     | _ => pure ()
+    -- Post-process enum classes: convert simple assignments to enum members
+    let isEnum ← isEnumSubclass bases.toArray
+    if isEnum then
+      match classVal with
+      | .classObj cref => do
+        let cd' ← heapGetClassData cref
+        let mut ns' := cd'.ns
+        let mut autoCounter := 1
+        -- Extract names from class body in source order
+        let memberNames := cd.body.filterMap fun stmt =>
+          match stmt with
+          | .assign [.name n _] _ _ => if n.startsWith "__" && n.endsWith "__" then none else some n
+          | .annAssign (.name n _) _ _ _ _ => if n.startsWith "__" && n.endsWith "__" then none else some n
+          | _ => none
+        for k in memberNames do
+          if let some v := cd'.ns[k]? then
+            match v with
+            | .function _ | .staticMethod _ | .classMethod _ | .property _ _ _ => continue
+            | _ =>
+              let memberVal ← match v with
+                | .builtin "enum.auto_value" => do
+                  let val := Value.int autoCounter
+                  autoCounter := autoCounter + 1
+                  pure val
+                | _ => pure v
+              let member ← allocInstance {
+                cls := classVal
+                attrs := ({} : Std.HashMap String Value)
+                  |>.insert "name" (.str k)
+                  |>.insert "value" memberVal
+                  |>.insert "_name_" (.str k)
+                  |>.insert "_value_" memberVal
+              }
+              ns' := ns'.insert k member
+        heapSetClassData cref { cd' with ns := ns' }
+      | _ => pure ()
     -- Apply class decorators (innermost first = reverse the list)
     let mut decorated := classVal
     for dec in cd.decoratorList.reverse do
@@ -2092,6 +2282,86 @@ partial def builtinFilter (args : List Value) : InterpM Value := do
       if keep then result := result.push item
     allocList result
   | _ => throwTypeError "filter() requires exactly two arguments"
+
+-- ============================================================
+-- Enum support: check if any base class is an Enum
+-- ============================================================
+
+partial def isEnumSubclass (bases : Array Value) : InterpM Bool := do
+  for base in bases do
+    match base with
+    | .classObj ref => do
+      let cd ← heapGetClassData ref
+      if cd.name == "Enum" || cd.name == "IntEnum" then return true
+      -- Also check MRO
+      for mroEntry in cd.mro do
+        match mroEntry with
+        | .classObj mref => do
+          let mcd ← heapGetClassData mref
+          if mcd.name == "Enum" || mcd.name == "IntEnum" then return true
+        | _ => pure ()
+    | _ => pure ()
+  return false
+
+-- ============================================================
+-- functools.reduce (needs callValueDispatch for callback)
+-- ============================================================
+
+partial def builtinFunctoolsReduce (args : List Value) : InterpM Value := do
+  match args with
+  | [func, iter] => do
+    let items ← iterValues iter
+    if items.isEmpty then throwTypeError "reduce() of empty iterable with no initial value"
+    let mut acc := items[0]!
+    for i in [1:items.size] do
+      acc ← callValueDispatch func [acc, items[i]!] []
+    return acc
+  | [func, iter, initial] => do
+    let items ← iterValues iter
+    let mut acc := initial
+    for item in items do
+      acc ← callValueDispatch func [acc, item] []
+    return acc
+  | _ => throwTypeError "reduce() requires 2 or 3 arguments"
+
+-- ============================================================
+-- itertools.accumulate (needs callValueDispatch for custom func)
+-- ============================================================
+
+partial def builtinItertoolsAccumulate (args : List Value)
+    (kwargs : List (String × Value)) : InterpM Value := do
+  let (iter, func) := match args with
+    | [iter] => (iter, none)
+    | [iter, func] => (iter, some func)
+    | _ => (Value.none, none)
+  let func := match kwargs.find? (fun p => p.1 == "func") with
+    | some (_, f) => some f
+    | none => func
+  let initial := kwargs.find? (fun p => p.1 == "initial") |>.map (·.2)
+  let items ← iterValues iter
+  let mut result : Array Value := #[]
+  let mut acc : Value := match initial with
+    | some v => v
+    | none =>
+      if items.isEmpty then .none
+      else items[0]!
+  match initial with
+  | some _ =>
+    result := result.push acc
+    for item in items do
+      acc ← match func with
+        | some f => callValueDispatch f [acc, item] []
+        | none => evalBinOp .add acc item
+      result := result.push acc
+  | none =>
+    if items.isEmpty then return ← allocList #[]
+    result := result.push acc
+    for i in [1:items.size] do
+      acc ← match func with
+        | some f => callValueDispatch f [acc, items[i]!] []
+        | none => evalBinOp .add acc items[i]!
+      result := result.push acc
+  allocList result
 
 -- ============================================================
 -- hasattr / getattr (need getAttributeValue, so must be in mutual block)

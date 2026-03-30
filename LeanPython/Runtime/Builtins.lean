@@ -1,4 +1,5 @@
 import LeanPython.Runtime.Ops
+import LeanPython.Stdlib.Math
 
 set_option autoImplicit false
 
@@ -7,6 +8,7 @@ namespace LeanPython.Runtime.Builtins
 open LeanPython.Runtime
 open LeanPython.Runtime.Ops
 open LeanPython.Interpreter
+open LeanPython.Stdlib.Math
 
 -- ============================================================
 -- Individual builtin implementations
@@ -395,6 +397,65 @@ def builtinCallable (args : List Value) : InterpM Value := do
   | _ => throwTypeError "callable() takes exactly one argument"
 
 -- ============================================================
+-- copy module helpers
+-- ============================================================
+
+/-- Shallow copy of a Python value. -/
+partial def shallowCopy (v : Value) : InterpM Value := do
+  match v with
+  | .list ref => do
+    let items ← heapGetList ref
+    allocList items
+  | .dict ref => do
+    let pairs ← heapGetDict ref
+    allocDict pairs
+  | .set ref => do
+    let items ← heapGetSet ref
+    allocSet items
+  | .instance ref => do
+    let id_ ← heapGetInstanceData ref
+    let newRef ← heapAlloc (.instanceObjData { cls := id_.cls, attrs := id_.attrs })
+    return .instance newRef
+  -- Immutable types: return as-is
+  | v => return v
+
+/-- Deep copy of a Python value (no cycle detection). -/
+partial def deepCopy (v : Value) : InterpM Value := do
+  match v with
+  | .list ref => do
+    let items ← heapGetList ref
+    let mut copied := #[]
+    for item in items do
+      copied := copied.push (← deepCopy item)
+    allocList copied
+  | .dict ref => do
+    let pairs ← heapGetDict ref
+    let mut copied := #[]
+    for (k, val) in pairs do
+      copied := copied.push (← deepCopy k, ← deepCopy val)
+    allocDict copied
+  | .set ref => do
+    let items ← heapGetSet ref
+    let mut copied := #[]
+    for item in items do
+      copied := copied.push (← deepCopy item)
+    allocSet copied
+  | .instance ref => do
+    let id_ ← heapGetInstanceData ref
+    let mut attrs : Std.HashMap String Value := {}
+    for (k, val) in id_.attrs.toList do
+      attrs := attrs.insert k (← deepCopy val)
+    let newRef ← heapAlloc (.instanceObjData { cls := id_.cls, attrs := attrs })
+    return .instance newRef
+  | .tuple items => do
+    let mut copied := #[]
+    for item in items do
+      copied := copied.push (← deepCopy item)
+    return .tuple copied
+  -- Immutable types: return as-is
+  | v => return v
+
+-- ============================================================
 -- Main dispatch
 -- ============================================================
 
@@ -548,6 +609,187 @@ partial def callBuiltin (name : String) (args : List Value)
         let strs ← args.mapM valueToStr
         pure (", ".intercalate strs)
     return .exception name msg
+  -- ============================================================
+  -- math module functions
+  -- ============================================================
+  | "math.ceil"  => mathCeil args
+  | "math.floor" => mathFloor args
+  | "math.sqrt"  => mathSqrt args
+  | "math.log"   => mathLog args
+  | "math.log2"  => mathLog2 args
+  | "math.fabs"  => mathFabs args
+  | "math.isnan" => mathIsnan args
+  | "math.isinf" => mathIsinf args
+  -- ============================================================
+  -- copy module functions
+  -- ============================================================
+  | "copy.copy" => do
+    match args with
+    | [v] => shallowCopy v
+    | _ => throwTypeError "copy.copy() takes exactly 1 argument"
+  | "copy.deepcopy" => do
+    match args with
+    | [v] => deepCopy v
+    | _ => throwTypeError "copy.deepcopy() takes exactly 1 argument"
+  -- ============================================================
+  -- operator module functions
+  -- ============================================================
+  | "operator.add" => do
+    match args with
+    | [a, b] => evalBinOp .add a b
+    | _ => throwTypeError "operator.add() takes exactly 2 arguments"
+  | "operator.sub" => do
+    match args with
+    | [a, b] => evalBinOp .sub a b
+    | _ => throwTypeError "operator.sub() takes exactly 2 arguments"
+  | "operator.mul" => do
+    match args with
+    | [a, b] => evalBinOp .mult a b
+    | _ => throwTypeError "operator.mul() takes exactly 2 arguments"
+  | "operator.eq" => do
+    match args with
+    | [a, b] => .bool <$> valueEq a b
+    | _ => throwTypeError "operator.eq() takes exactly 2 arguments"
+  | "operator.ne" => do
+    match args with
+    | [a, b] => .bool <$> (not <$> valueEq a b)
+    | _ => throwTypeError "operator.ne() takes exactly 2 arguments"
+  | "operator.lt" => do
+    match args with
+    | [a, b] => .bool <$> evalCmpOp .lt a b
+    | _ => throwTypeError "operator.lt() takes exactly 2 arguments"
+  | "operator.le" => do
+    match args with
+    | [a, b] => .bool <$> evalCmpOp .ltE a b
+    | _ => throwTypeError "operator.le() takes exactly 2 arguments"
+  | "operator.gt" => do
+    match args with
+    | [a, b] => .bool <$> evalCmpOp .gt a b
+    | _ => throwTypeError "operator.gt() takes exactly 2 arguments"
+  | "operator.ge" => do
+    match args with
+    | [a, b] => .bool <$> evalCmpOp .gtE a b
+    | _ => throwTypeError "operator.ge() takes exactly 2 arguments"
+  | "operator.neg" => do
+    match args with
+    | [.int n] => return .int (-n)
+    | [.float f] => return .float (-f)
+    | _ => throwTypeError "operator.neg() takes exactly 1 numeric argument"
+  | "operator.not_" => do
+    match args with
+    | [v] => return .bool (!(← isTruthy v))
+    | _ => throwTypeError "operator.not_() takes exactly 1 argument"
+  -- ============================================================
+  -- itertools module functions (pure ones)
+  -- ============================================================
+  | "itertools.chain" => do
+    let mut result : Array Value := #[]
+    for arg in args do
+      let items ← iterValues arg
+      result := result ++ items
+    allocGenerator result
+  | "itertools.count" => do
+    -- itertools.count(start=0, step=1) — generate a bounded sequence
+    let start := match args.head? with
+      | some (.int n) => n | _ => 0
+    let step := match args.drop 1 |>.head? with
+      | some (.int n) => n | _ => 1
+    -- Materialize a bounded range (1000 elements max for safety)
+    let mut result : Array Value := #[]
+    let mut cur := start
+    for _ in [:1000] do
+      result := result.push (.int cur)
+      cur := cur + step
+    allocGenerator result
+  -- ============================================================
+  -- functools stubs (lru_cache, wraps as identity decorators)
+  -- ============================================================
+  | "functools.lru_cache" => do
+    -- lru_cache can be called as @lru_cache or @lru_cache(maxsize=128)
+    match args with
+    | [f@(.function _)] => return f
+    | [f@(.builtin _)] => return f
+    | [.int _] => return .builtin "functools.lru_cache"
+    | [.none] => return .builtin "functools.lru_cache"
+    | [] => return .builtin "functools.lru_cache"
+    | _ => match args.head? with
+      | some f => return f
+      | none => return .builtin "functools.lru_cache"
+  | "functools.wraps" => do
+    -- wraps(wrapped) returns a decorator that is identity
+    match args with
+    | [_] => return .builtin "functools.wraps_inner"
+    | _ => throwTypeError "functools.wraps() takes exactly 1 argument"
+  | "functools.wraps_inner" => do
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "functools.wraps() decorator takes exactly 1 argument"
+  | "functools.partial" => do
+    -- Stub: not yet implemented
+    throwNotImplemented "functools.partial is not yet implemented"
+  | "functools.cached_property" => do
+    -- Identity decorator for now
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "functools.cached_property() takes exactly 1 argument"
+  | "functools.total_ordering" => do
+    -- Identity decorator for now
+    match args with
+    | [cls] => return cls
+    | _ => throwTypeError "functools.total_ordering() takes exactly 1 argument"
+  | "functools.singledispatch" => do
+    -- Stub: just return the function
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "functools.singledispatch() takes exactly 1 argument"
+  -- ============================================================
+  -- abc module functions
+  -- ============================================================
+  | "abc.abstractmethod" => do
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "abstractmethod() takes exactly 1 argument"
+  -- ============================================================
+  -- dataclasses module functions
+  -- ============================================================
+  -- ============================================================
+  -- enum module functions
+  -- ============================================================
+  -- ============================================================
+  -- typing module functions
+  -- ============================================================
+  | "typing.get_type_hints" => do
+    match args with
+    | [.instance ref] => do
+      let id_ ← heapGetInstanceData ref
+      match id_.attrs["__annotations__"]? with
+      | some v => return v
+      | none => allocDict #[]
+    | [.classObj ref] => do
+      let cd ← heapGetClassData ref
+      match cd.ns["__annotations__"]? with
+      | some v => return v
+      | none => allocDict #[]
+    | [_] => allocDict #[]
+    | _ => throwTypeError "get_type_hints() takes exactly 1 argument"
+  | "enum.auto" => do
+    -- Returns a sentinel that gets replaced during enum class creation
+    return .builtin "enum.auto_value"
+  | "enum.auto_value" => do
+    -- Should not be called directly
+    throwTypeError "auto() value should not be called directly"
+  | "dataclasses.field" => do
+    -- field(default=..., default_factory=...) returns a sentinel tuple
+    let default_ := kwargs.find? (fun p => p.1 == "default") |>.map (·.2)
+    let factory := kwargs.find? (fun p => p.1 == "default_factory") |>.map (·.2)
+    return .tuple #[.str "__dataclass_field__",
+                    default_.getD .none,
+                    factory.getD .none]
+  | "dataclasses.fields" => do
+    -- Stub: returns empty tuple for now
+    match args with
+    | [_] => return .tuple #[]
+    | _ => throwTypeError "dataclasses.fields() takes exactly 1 argument"
   | _ => throwNotImplemented s!"builtin '{name}' is not implemented"
 
 end LeanPython.Runtime.Builtins

@@ -51,6 +51,7 @@ structure InterpreterState where
   searchPaths    : Array String
   currentFile    : Option String
   currentPackage : Option String
+  defaultFactories : Std.HashMap Nat Value := {}
   deriving Inhabited
 
 /-- Create a fresh interpreter state. -/

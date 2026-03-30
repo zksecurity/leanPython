@@ -45,12 +45,17 @@ LeanPython/
     Types.lean       — Value, HeapRef, HeapObject, FuncData, RuntimeError, Scope
     Ops.lean         — Operator dispatch, truthiness, equality, comparison, iteration
     Builtins.lean    — Built-in function implementations (print, len, range, etc.)
+  Stdlib.lean        — stdlib umbrella import
+  Stdlib/
+    Math.lean        — Pure math helpers (ceil, floor, sqrt, log, etc.)
 Main.lean            — CLI entry point (reads .py file, parses, interprets)
 LeanPythonTest.lean      — test driver root
 LeanPythonTest/
   Basic.lean         — lexer tests (keywords, operators, numbers, strings, indent)
   Parser.lean        — parser tests (expressions, statements, integration)
   Interpreter.lean   — interpreter tests (#eval-based, IO assertions)
+  Module.lean        — module system tests (imports, packages, relative imports)
+  Stdlib.lean        — stdlib module tests (math, copy, functools, collections, etc.)
 ```
 
 ## Code Style

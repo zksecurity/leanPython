@@ -2,3 +2,4 @@ import LeanPythonTest.Basic
 import LeanPythonTest.Parser
 import LeanPythonTest.Interpreter
 import LeanPythonTest.Module
+import LeanPythonTest.Stdlib
