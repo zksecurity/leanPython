@@ -13,6 +13,7 @@ open LeanPython.Runtime.Ops
 open LeanPython.Runtime.Builtins
 open LeanPython.Interpreter
 open LeanPython.Parser (parse)
+open LeanPython.Stdlib.IO
 open LeanPython.Lexer (SourceSpan SourcePos)
 
 -- ============================================================
@@ -724,6 +725,40 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         match args with
         | [obj] => getAttributeValue obj attrName
         | _ => throwTypeError "attrgetter object takes exactly 1 argument"
+      else if name == "io.BytesIO" then do
+        -- Construct a BytesIO instance with _buffer and _pos attrs
+        let initBuf := match args with
+          | [.bytes b] => b
+          | [] => ByteArray.empty
+          | _ => ByteArray.empty
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_buffer" (.bytes initBuf)
+        attrs := attrs.insert "_pos" (.int 0)
+        -- Create a class object for BytesIO (lightweight)
+        let cls ← allocClassObj {
+          name := "BytesIO", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "BytesIO", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "io.StringIO" then do
+        let initBuf := match args with
+          | [.str s] => s
+          | [] => ""
+          | _ => ""
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_buffer" (.str initBuf)
+        attrs := attrs.insert "_pos" (.int 0)
+        let cls ← allocClassObj {
+          name := "StringIO", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "StringIO", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
       else
         callBuiltin name args kwargs
   | .function ref => do
@@ -1052,6 +1087,17 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     match id_.cls with
     | .classObj cref => do
       let cd ← heapGetClassData cref
+      -- Builtin instance types: return bound methods for known method names
+      if cd.name == "BytesIO" && ["write", "read", "getvalue", "seek", "tell",
+            "__enter__", "__exit__", "close"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "StringIO" && ["write", "read", "getvalue", "seek", "tell",
+            "__enter__", "__exit__", "close"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
       -- First pass: check for data descriptors (property with getter)
       for mroEntry in cd.mro do
         match mroEntry with
@@ -1469,6 +1515,46 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
               "MutableMapping", "MutableSequence", "MutableSet",
               "Callable", "Hashable", "Sized", "Container"] do
       ns := ns.insert n .none
+    some <$> mkMod ns
+  | "struct" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "pack"     (.builtin "struct.pack")
+    ns := ns.insert "unpack"   (.builtin "struct.unpack")
+    ns := ns.insert "calcsize" (.builtin "struct.calcsize")
+    some <$> mkMod ns
+  | "io" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "BytesIO"  (.builtin "io.BytesIO")
+    ns := ns.insert "StringIO" (.builtin "io.StringIO")
+    some <$> mkMod ns
+  | "bisect" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "bisect_left"  (.builtin "bisect.bisect_left")
+    ns := ns.insert "bisect_right" (.builtin "bisect.bisect_right")
+    ns := ns.insert "bisect"       (.builtin "bisect.bisect")
+    ns := ns.insert "insort"       (.builtin "bisect.insort")
+    ns := ns.insert "insort_right" (.builtin "bisect.insort_right")
+    ns := ns.insert "insort_left"  (.builtin "bisect.insort_left")
+    some <$> mkMod ns
+  | "base64" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "b64encode"         (.builtin "base64.b64encode")
+    ns := ns.insert "b64decode"         (.builtin "base64.b64decode")
+    ns := ns.insert "urlsafe_b64encode" (.builtin "base64.urlsafe_b64encode")
+    ns := ns.insert "urlsafe_b64decode" (.builtin "base64.urlsafe_b64decode")
+    ns := ns.insert "b16encode"         (.builtin "base64.b16encode")
+    ns := ns.insert "b16decode"         (.builtin "base64.b16decode")
+    some <$> mkMod ns
+  | "json" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "dumps" (.builtin "json.dumps")
+    ns := ns.insert "loads" (.builtin "json.loads")
+    some <$> mkMod ns
+  | "re" =>
+    let mut ns : Std.HashMap String Value := {}
+    for n in ["compile", "match", "search", "sub", "findall", "split",
+              "IGNORECASE", "MULTILINE", "DOTALL", "VERBOSE"] do
+      ns := ns.insert n (.builtin s!"re.{n}")
     some <$> mkMod ns
   | _ => return none
 
@@ -2190,8 +2276,12 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
   | .instance iref => do
     -- Look up method in instance's class MRO and call with self
     let id_ ← heapGetInstanceData iref
+    -- Check for builtin instance types (BytesIO, StringIO)
     match id_.cls with
     | .classObj cref => do
+      let cd_ ← heapGetClassData cref
+      if cd_.name == "BytesIO" then return ← callBytesIOMethod iref method args
+      if cd_.name == "StringIO" then return ← callStringIOMethod iref method args
       let cd ← heapGetClassData cref
       let mut found : Option (Value × Value) := none  -- (function, defining class)
       for mroEntry in cd.mro do

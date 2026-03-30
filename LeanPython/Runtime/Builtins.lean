@@ -1,5 +1,10 @@
 import LeanPython.Runtime.Ops
 import LeanPython.Stdlib.Math
+import LeanPython.Stdlib.Struct
+import LeanPython.Stdlib.IO
+import LeanPython.Stdlib.Bisect
+import LeanPython.Stdlib.Base64
+import LeanPython.Stdlib.Json
 
 set_option autoImplicit false
 
@@ -9,6 +14,10 @@ open LeanPython.Runtime
 open LeanPython.Runtime.Ops
 open LeanPython.Interpreter
 open LeanPython.Stdlib.Math
+open LeanPython.Stdlib.Struct
+open LeanPython.Stdlib.Bisect
+open LeanPython.Stdlib.Base64
+open LeanPython.Stdlib.Json
 
 -- ============================================================
 -- Individual builtin implementations
@@ -790,6 +799,35 @@ partial def callBuiltin (name : String) (args : List Value)
     match args with
     | [_] => return .tuple #[]
     | _ => throwTypeError "dataclasses.fields() takes exactly 1 argument"
+  -- ============================================================
+  -- struct module functions
+  -- ============================================================
+  | "struct.pack"     => structPack args
+  | "struct.unpack"   => structUnpack args
+  | "struct.calcsize" => structCalcsize args
+  -- ============================================================
+  -- bisect module functions
+  -- ============================================================
+  | "bisect.bisect_left"  => bisectLeft args kwargs
+  | "bisect.bisect_right" => bisectRight args kwargs
+  | "bisect.bisect"       => bisectRight args kwargs  -- bisect is alias for bisect_right
+  | "bisect.insort"       => bisectInsort args kwargs
+  | "bisect.insort_right" => bisectInsort args kwargs
+  | "bisect.insort_left"  => bisectInsort args kwargs  -- simplified
+  -- ============================================================
+  -- base64 module functions
+  -- ============================================================
+  | "base64.b64encode"           => b64encode args
+  | "base64.b64decode"           => b64decode args
+  | "base64.urlsafe_b64encode"   => urlsafeB64encode args
+  | "base64.urlsafe_b64decode"   => urlsafeB64decode args
+  | "base64.b16encode"           => b16encode args
+  | "base64.b16decode"           => b16decode args
+  -- ============================================================
+  -- json module functions
+  -- ============================================================
+  | "json.dumps" => jsonDumps args kwargs
+  | "json.loads" => jsonLoads args
   | _ => throwNotImplemented s!"builtin '{name}' is not implemented"
 
 end LeanPython.Runtime.Builtins

@@ -48,6 +48,11 @@ LeanPython/
   Stdlib.lean        — stdlib umbrella import
   Stdlib/
     Math.lean        — Pure math helpers (ceil, floor, sqrt, log, etc.)
+    Struct.lean      — struct.pack/unpack/calcsize (binary data packing)
+    IO.lean          — io.BytesIO/StringIO (in-memory stream objects)
+    Bisect.lean      — bisect_left/bisect_right/insort (binary search)
+    Base64.lean      — b64encode/decode, b16encode/decode, urlsafe variants
+    Json.lean        — json.dumps (serializer) and json.loads (parser)
 Main.lean            — CLI entry point (reads .py file, parses, interprets)
 LeanPythonTest.lean      — test driver root
 LeanPythonTest/

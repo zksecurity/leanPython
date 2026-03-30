@@ -218,3 +218,154 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- defaultdict nested
 #eval assertPy "from collections import defaultdict\nd = defaultdict(int)\nd['a'] = 1\nd['b'] = 2\nprint(d['a'] + d['b'] + d['c'])" "3\n"
+
+-- ============================================================
+-- struct module tests
+-- ============================================================
+
+-- struct.calcsize
+#eval assertPy "import struct\nprint(struct.calcsize('>H'))" "2\n"
+#eval assertPy "import struct\nprint(struct.calcsize('>Q'))" "8\n"
+#eval assertPy "import struct\nprint(struct.calcsize('>HQ'))" "10\n"
+#eval assertPy "import struct\nprint(struct.calcsize('<BHI'))" "7\n"
+#eval assertPy "import struct\nprint(struct.calcsize('<?'))" "1\n"
+
+-- struct.pack + unpack round-trip (big-endian uint16)
+#eval assertPy "import struct\ndata = struct.pack('>H', 256)\nprint(struct.unpack('>H', data)[0])" "256\n"
+
+-- struct.pack + unpack round-trip (big-endian uint64)
+#eval assertPy "import struct\ndata = struct.pack('>Q', 42)\nprint(struct.unpack('>Q', data)[0])" "42\n"
+
+-- struct.pack + unpack round-trip (little-endian uint32)
+#eval assertPy "import struct\ndata = struct.pack('<I', 12345)\nprint(struct.unpack('<I', data)[0])" "12345\n"
+
+-- struct.pack bool
+#eval assertPy "import struct\ndata = struct.pack('<?', True)\nprint(struct.unpack('<?', data)[0])" "True\n"
+
+-- struct.pack uint8
+#eval assertPy "import struct\ndata = struct.pack('>B', 255)\nprint(struct.unpack('>B', data)[0])" "255\n"
+
+-- struct.pack multiple values
+#eval assertPy "import struct\ndata = struct.pack('>BH', 1, 1000)\nresult = struct.unpack('>BH', data)\nprint(result[0])\nprint(result[1])" "1\n1000\n"
+
+-- from struct import
+#eval assertPy "from struct import pack, unpack\nprint(unpack('>H', pack('>H', 500))[0])" "500\n"
+
+-- ============================================================
+-- io module tests
+-- ============================================================
+
+-- BytesIO basic write + getvalue
+#eval assertPy "import io\nb = io.BytesIO()\nb.write(b'\\x01\\x02\\x03')\nprint(len(b.getvalue()))" "3\n"
+
+-- BytesIO write then seek and read
+#eval assertPy "import io\nb = io.BytesIO()\nb.write(b'hello')\nb.seek(0)\ndata = b.read()\nprint(len(data))" "5\n"
+
+-- BytesIO initial data
+#eval assertPy "import io\nb = io.BytesIO(b'abc')\nprint(len(b.getvalue()))" "3\n"
+
+-- BytesIO tell
+#eval assertPy "import io\nb = io.BytesIO()\nb.write(b'hello')\nprint(b.tell())" "5\n"
+
+-- BytesIO seek and read partial
+#eval assertPy "import io\nb = io.BytesIO(b'\\x00\\x01\\x02\\x03\\x04')\ndata = b.read(3)\nprint(len(data))\nprint(b.tell())" "3\n3\n"
+
+-- BytesIO context manager
+#eval assertPy "import io\nwith io.BytesIO() as buf:\n    buf.write(b'test')\n    v = buf.getvalue()\nprint(len(v))" "4\n"
+
+-- StringIO basic
+#eval assertPy "import io\ns = io.StringIO()\ns.write('hello')\nprint(s.getvalue())" "hello\n"
+
+-- StringIO seek and read
+#eval assertPy "import io\ns = io.StringIO('hello world')\nresult = s.read(5)\nprint(result)" "hello\n"
+
+-- from io import
+#eval assertPy "from io import BytesIO\nb = BytesIO(b'\\x41\\x42')\nprint(len(b.getvalue()))" "2\n"
+
+-- ============================================================
+-- bisect module tests
+-- ============================================================
+
+-- bisect_left
+#eval assertPy "import bisect\nprint(bisect.bisect_left([1, 3, 5, 7], 4))" "2\n"
+#eval assertPy "import bisect\nprint(bisect.bisect_left([1, 3, 5, 7], 5))" "2\n"
+#eval assertPy "import bisect\nprint(bisect.bisect_left([1, 3, 5, 7], 0))" "0\n"
+#eval assertPy "import bisect\nprint(bisect.bisect_left([1, 3, 5, 7], 8))" "4\n"
+
+-- bisect_right
+#eval assertPy "import bisect\nprint(bisect.bisect_right([1, 3, 5, 7], 5))" "3\n"
+#eval assertPy "import bisect\nprint(bisect.bisect_right([1, 3, 5, 7], 0))" "0\n"
+#eval assertPy "import bisect\nprint(bisect.bisect_right([1, 3, 5, 7], 8))" "4\n"
+
+-- insort
+#eval assertPy "import bisect\na = [1, 3, 5]\nbisect.insort(a, 4)\nprint(a)" "[1, 3, 4, 5]\n"
+#eval assertPy "import bisect\na = [1, 3, 5]\nbisect.insort(a, 0)\nprint(a)" "[0, 1, 3, 5]\n"
+#eval assertPy "import bisect\na = [1, 3, 5]\nbisect.insort(a, 6)\nprint(a)" "[1, 3, 5, 6]\n"
+
+-- from bisect import
+#eval assertPy "from bisect import bisect_left, insort\na = [10, 20, 30]\nprint(bisect_left(a, 25))\ninsort(a, 25)\nprint(a)" "2\n[10, 20, 25, 30]\n"
+
+-- ============================================================
+-- base64 module tests
+-- ============================================================
+
+-- b64encode produces correct ASCII output
+#eval assertPy "import base64\nresult = base64.b64encode(b'hello')\nprint(result.decode())" "aGVsbG8=\n"
+
+-- b64decode round-trip
+#eval assertPy "import base64\noriginal = b'hello world'\nencoded = base64.b64encode(original)\ndecoded = base64.b64decode(encoded)\nprint(decoded == original)" "True\n"
+
+-- b16encode (hex encoding)
+#eval assertPy "import base64\nresult = base64.b16encode(b'\\xff\\x00')\nprint(result.decode())" "FF00\n"
+
+-- b16decode round-trip
+#eval assertPy "import base64\noriginal = b'\\xab\\xcd\\xef'\nencoded = base64.b16encode(original)\ndecoded = base64.b16decode(encoded)\nprint(decoded == original)" "True\n"
+
+-- urlsafe variants round-trip
+#eval assertPy "import base64\noriginal = b'\\xfb\\xff\\xfe'\nencoded = base64.urlsafe_b64encode(original)\ndecoded = base64.urlsafe_b64decode(encoded)\nprint(decoded == original)" "True\n"
+
+-- b64encode empty
+#eval assertPy "import base64\nprint(base64.b64encode(b'').decode())" "\n"
+
+-- from base64 import
+#eval assertPy "from base64 import b64encode, b64decode\nprint(b64decode(b64encode(b'test')) == b'test')" "True\n"
+
+-- ============================================================
+-- json module tests
+-- ============================================================
+
+-- json.dumps primitives
+#eval assertPy "import json\nprint(json.dumps(None))" "null\n"
+#eval assertPy "import json\nprint(json.dumps(True))" "true\n"
+#eval assertPy "import json\nprint(json.dumps(False))" "false\n"
+#eval assertPy "import json\nprint(json.dumps(42))" "42\n"
+
+-- json.dumps strings
+#eval assertPy "import json\nprint(json.dumps('hello'))" "\"hello\"\n"
+
+-- json.dumps list
+#eval assertPy "import json\nprint(json.dumps([1, 2, 3]))" "[1, 2, 3]\n"
+
+-- json.dumps dict
+#eval assertPy "import json\nd = {'a': 1, 'b': 2}\nresult = json.dumps(d)\nprint('\"a\"' in result)\nprint('\"b\"' in result)" "True\nTrue\n"
+
+-- json.loads primitives
+#eval assertPy "import json\nprint(json.loads('null'))" "None\n"
+#eval assertPy "import json\nprint(json.loads('true'))" "True\n"
+#eval assertPy "import json\nprint(json.loads('false'))" "False\n"
+#eval assertPy "import json\nprint(json.loads('42'))" "42\n"
+
+-- json.loads string
+#eval assertPy "import json\nprint(json.loads('\"hello\"'))" "hello\n"
+
+-- json.loads array
+#eval assertPy "import json\nresult = json.loads('[1, 2, 3]')\nprint(len(result))\nprint(result[0])\nprint(result[2])" "3\n1\n3\n"
+
+-- json.loads object
+#eval assertPy "import json\nresult = json.loads('{\"x\": 42}')\nprint(result['x'])" "42\n"
+
+-- json round-trip
+#eval assertPy "import json\noriginal = {'key': [1, 2, 3], 'flag': True, 'name': 'test'}\ns = json.dumps(original)\nparsed = json.loads(s)\nprint(parsed['key'][0])\nprint(parsed['flag'])\nprint(parsed['name'])" "1\nTrue\ntest\n"
+
+-- from json import
+#eval assertPy "from json import dumps, loads\nprint(loads(dumps([1, 2]))[1])" "2\n"
