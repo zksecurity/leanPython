@@ -17,6 +17,12 @@ open LeanPython.Stdlib.IO
 open LeanPython.Stdlib.Hashlib
 open LeanPython.Stdlib.Hmac
 open LeanPython.Stdlib.Secrets
+open LeanPython.Stdlib.Sys
+open LeanPython.Stdlib.Os
+open LeanPython.Stdlib.Time (timeTime timeMonotonic timeSleep)
+open LeanPython.Stdlib.Datetime
+open LeanPython.Stdlib.Pathlib
+open LeanPython.Stdlib.Logging
 open LeanPython.Lexer (SourceSpan SourcePos)
 
 -- ============================================================
@@ -336,13 +342,21 @@ partial def evalExpr (e : Expr) : InterpM Value := do
       match ← callDunder l (binOpToDunder op) [r] with
       | some result => return result
       | none =>
-        -- Try reflected operator on right
-        match r with
-        | .instance _ =>
-          match ← callDunder r (binOpToRDunder op) [l] with
-          | some result => return result
-          | none => evalBinOp op l r
-        | _ => evalBinOp op l r
+        -- Fallback: try callBoundMethod for builtin instance types
+        let bmResult ← try
+          let v ← callBoundMethod l (binOpToDunder op) [r]
+          pure (some v)
+        catch _ => pure none
+        match bmResult with
+        | some result => return result
+        | none =>
+          -- Try reflected operator on right
+          match r with
+          | .instance _ =>
+            match ← callDunder r (binOpToRDunder op) [l] with
+            | some result => return result
+            | none => evalBinOp op l r
+          | _ => evalBinOp op l r
     | _ =>
       match r with
       | .instance _ =>
@@ -638,13 +652,28 @@ partial def callValueDispatch (callee : Value) (args : List Value)
       | [inst@(.instance _)] =>
         match ← callDunder inst "__str__" [] with
         | some v => return v
-        | none => callBuiltin name args kwargs
+        | none =>
+          -- Fallback: try callBoundMethod for builtin instance types
+          let r ← try
+            let v ← callBoundMethod inst "__str__" []
+            pure (some v)
+          catch _ => pure none
+          match r with
+          | some v => return v
+          | none => callBuiltin name args kwargs
       | _ => callBuiltin name args kwargs
     | "repr" => match args with
       | [inst@(.instance _)] =>
         match ← callDunder inst "__repr__" [] with
         | some v => return v
-        | none => callBuiltin name args kwargs
+        | none =>
+          let r ← try
+            let v ← callBoundMethod inst "__repr__" []
+            pure (some v)
+          catch _ => pure none
+          match r with
+          | some v => return v
+          | none => callBuiltin name args kwargs
       | _ => callBuiltin name args kwargs
     | "len" => match args with
       | [inst@(.instance _)] =>
@@ -685,7 +714,15 @@ partial def callValueDispatch (callee : Value) (args : List Value)
           match ← callDunder arg "__str__" [] with
           | some (.str s) => args' := args' ++ [.str s]
           | some v => args' := args' ++ [v]
-          | none => args' := args' ++ [arg]
+          | none =>
+            -- Fallback: try callBoundMethod for builtin instance types
+            let strResult ← try
+              let v ← callBoundMethod arg "__str__" []
+              pure (some v)
+            catch _ => pure none
+            match strResult with
+            | some (.str s) => args' := args' ++ [.str s]
+            | _ => args' := args' ++ [arg]
         | other => args' := args' ++ [other]
       callBuiltin name args' kwargs
     | "dataclass" => match args with
@@ -847,6 +884,224 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         tokenBytes args
       else if name == "secrets.randbelow" then
         randbelow args
+      -- ============================================================
+      -- datetime module constructors
+      -- ============================================================
+      else if name == "datetime.datetime" then do
+        -- datetime(year, month, day[, hour[, minute[, second[, microsecond]]]])
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_year"        (args.getD 0 (.int 1970))
+        attrs := attrs.insert "_month"       (args.getD 1 (.int 1))
+        attrs := attrs.insert "_day"         (args.getD 2 (.int 1))
+        attrs := attrs.insert "_hour"        (args.getD 3 (.int 0))
+        attrs := attrs.insert "_minute"      (args.getD 4 (.int 0))
+        attrs := attrs.insert "_second"      (args.getD 5 (.int 0))
+        attrs := attrs.insert "_microsecond" (args.getD 6 (.int 0))
+        -- Also set kwargs
+        for (k, v) in kwargs do
+          attrs := attrs.insert s!"_{k}" v
+        let cls ← allocClassObj {
+          name := "Datetime", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "Datetime", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "datetime.timedelta" then do
+        -- timedelta(days=0, seconds=0, microseconds=0, ...)
+        let mut days : Int := 0
+        let mut seconds : Int := 0
+        let mut microseconds : Int := 0
+        -- Positional args
+        if args.length >= 1 then
+          match args.getD 0 .none with | .int n => days := n | .float f => days := f.toUInt64.toNat | _ => pure ()
+        if args.length >= 2 then
+          match args.getD 1 .none with | .int n => seconds := n | .float f => seconds := f.toUInt64.toNat | _ => pure ()
+        if args.length >= 3 then
+          match args.getD 2 .none with | .int n => microseconds := n | _ => pure ()
+        -- Kwargs override
+        for (k, v) in kwargs do
+          match k, v with
+          | "days", .int n => days := n
+          | "days", .float f => days := f.toUInt64.toNat
+          | "seconds", .int n => seconds := n
+          | "seconds", .float f => seconds := f.toUInt64.toNat
+          | "microseconds", .int n => microseconds := n
+          | "hours", .int n => seconds := seconds + n * 3600
+          | "hours", .float f => seconds := seconds + (f * 3600.0).toUInt64.toNat
+          | "minutes", .int n => seconds := seconds + n * 60
+          | "minutes", .float f => seconds := seconds + (f * 60.0).toUInt64.toNat
+          | "weeks", .int n => days := days + n * 7
+          | _, _ => pure ()
+        -- Normalize: seconds overflow into days
+        days := days + seconds / 86400
+        seconds := seconds % 86400
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_days"         (.int days)
+        attrs := attrs.insert "_seconds"      (.int seconds)
+        attrs := attrs.insert "_microseconds" (.int microseconds)
+        attrs := attrs.insert "days"          (.int days)
+        attrs := attrs.insert "seconds"       (.int seconds)
+        attrs := attrs.insert "microseconds"  (.int microseconds)
+        let cls ← allocClassObj {
+          name := "Timedelta", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "Timedelta", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "datetime.timezone" then do
+        -- timezone(offset) or timezone.utc
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_name" (.str "UTC")
+        attrs := attrs.insert "_offset" (.int 0)
+        let cls ← allocClassObj {
+          name := "Timezone", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "Timezone", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "datetime.datetime.now" then do
+        -- Simplified: return a dummy datetime
+        let ms ← (IO.monoMsNow : BaseIO Nat)
+        let totalSec := ms / 1000
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_year"        (.int 2024)
+        attrs := attrs.insert "_month"       (.int 1)
+        attrs := attrs.insert "_day"         (.int 1)
+        attrs := attrs.insert "_hour"        (.int (totalSec / 3600 % 24))
+        attrs := attrs.insert "_minute"      (.int (totalSec / 60 % 60))
+        attrs := attrs.insert "_second"      (.int (totalSec % 60))
+        attrs := attrs.insert "_microsecond" (.int 0)
+        let cls ← allocClassObj {
+          name := "Datetime", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "Datetime", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "datetime.datetime.fromtimestamp" then do
+        let ts := match args with
+          | [.float f] => f
+          | [.int n] => Float.ofInt n
+          | _ => 0.0
+        let totalSec := ts.toUInt64.toNat
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_year"        (.int 1970)
+        attrs := attrs.insert "_month"       (.int 1)
+        attrs := attrs.insert "_day"         (.int (totalSec / 86400 + 1))
+        attrs := attrs.insert "_hour"        (.int (totalSec / 3600 % 24))
+        attrs := attrs.insert "_minute"      (.int (totalSec / 60 % 60))
+        attrs := attrs.insert "_second"      (.int (totalSec % 60))
+        attrs := attrs.insert "_microsecond" (.int 0)
+        let cls ← allocClassObj {
+          name := "Datetime", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "Datetime", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      -- ============================================================
+      -- pathlib module constructor
+      -- ============================================================
+      else if name == "pathlib.Path" || name == "pathlib.PurePath" then do
+        let path := match args with
+          | [.str s] => s
+          | [] => "."
+          | _ =>
+            -- Join multiple args
+            let strs := args.filterMap fun v => match v with | .str s => some s | _ => none
+            strs.foldl (fun acc s =>
+              if acc.isEmpty then s
+              else if s.startsWith "/" then s
+              else acc ++ "/" ++ s) ""
+        mkPathInstance path
+      -- ============================================================
+      -- logging module constructors
+      -- ============================================================
+      else if name == "logging.getLogger" then do
+        let loggerName := match args with
+          | [.str s] => s
+          | [] => "root"
+          | _ => "root"
+        mkLoggerInstance loggerName 30  -- WARNING level by default
+      else if name == "logging.Logger" then do
+        let loggerName := match args with
+          | [.str s] => s
+          | _ => "root"
+        mkLoggerInstance loggerName 30
+      else if name == "logging.StreamHandler" || name == "logging.NullHandler" ||
+              name == "logging.Formatter" then do
+        -- Stub: return a no-op instance
+        let clsName := if name == "logging.StreamHandler" then "StreamHandler"
+          else if name == "logging.Formatter" then "Formatter"
+          else "NullHandler"
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_name" (.str clsName)
+        let cls ← allocClassObj {
+          name := clsName, bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := clsName, bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      -- ============================================================
+      -- threading module constructors
+      -- ============================================================
+      else if name == "threading.Lock" || name == "threading.RLock" then do
+        let clsName := if name == "threading.Lock" then "Lock" else "RLock"
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_locked" (.bool false)
+        let cls ← allocClassObj {
+          name := clsName, bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := clsName, bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      else if name == "threading.Event" then do
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "_flag" (.bool false)
+        let cls ← allocClassObj {
+          name := "Event", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "Event", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      -- ============================================================
+      -- tempfile module constructors
+      -- ============================================================
+      else if name == "tempfile.NamedTemporaryFile" then do
+        let suffix ← (IO.rand 100000 999999 : IO Nat)
+        let tmpPath := s!"/tmp/leanpy_{suffix}"
+        let mut attrs : Std.HashMap String Value := {}
+        attrs := attrs.insert "name" (.str tmpPath)
+        attrs := attrs.insert "_buffer" (.bytes ByteArray.empty)
+        let cls ← allocClassObj {
+          name := "NamedTemporaryFile", bases := #[], mro := #[], ns := {}, slots := none }
+        match cls with
+        | .classObj cref => heapSetClassData cref {
+            name := "NamedTemporaryFile", bases := #[], mro := #[cls], ns := {}, slots := none }
+        | _ => pure ()
+        let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+        return .instance instRef
+      -- ============================================================
+      -- sys.getrecursionlimit / sys.setrecursionlimit stubs
+      -- ============================================================
+      else if name == "sys.getrecursionlimit" then
+        return .int 1000
+      else if name == "sys.setrecursionlimit" then
+        return .none
       else
         callBuiltin name args kwargs
   | .function ref => do
@@ -1116,6 +1371,22 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     | "object", "__new__" => return .boundMethod obj attr
     | "object", "__setattr__" => return .boundMethod obj attr
     | "object", "__delattr__" => return .boundMethod obj attr
+    -- datetime.timezone.utc — construct a UTC timezone instance
+    | "datetime.timezone", "utc" => do
+      let mut attrs : Std.HashMap String Value := {}
+      attrs := attrs.insert "_name" (.str "UTC")
+      attrs := attrs.insert "_offset" (.int 0)
+      let cls ← allocClassObj {
+        name := "Timezone", bases := #[], mro := #[], ns := {}, slots := none }
+      match cls with
+      | .classObj cref => heapSetClassData cref {
+          name := "Timezone", bases := #[], mro := #[cls], ns := {}, slots := none }
+      | _ => pure ()
+      let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+      return .instance instRef
+    -- datetime.datetime.now — class method
+    | "datetime.datetime", "now" => return .builtin "datetime.datetime.now"
+    | "datetime.datetime", "fromtimestamp" => return .builtin "datetime.datetime.fromtimestamp"
     | _, _ => throwAttributeError s!"type '{name}' has no attribute '{attr}'"
   | .exception _ _ =>
     match attr with
@@ -1192,6 +1463,84 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
         | .instance _ => return .boundMethod obj attr
         | _ => pure ()
       if cd.name == "HMAC" && ["update", "digest", "hexdigest", "copy"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "TextIOWrapper" && ["write", "flush", "fileno", "isatty",
+            "readable", "writable", "seekable", "close",
+            "__enter__", "__exit__"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "Datetime" then
+        -- Properties: return instance attrs directly
+        if ["year", "month", "day", "hour", "minute", "second"].contains attr then
+          match id_.attrs[s!"_{attr}"]? with
+          | some v => return v
+          | none => pure ()
+        -- Methods
+        if ["isoformat", "timestamp", "replace",
+              "__str__", "__repr__"].contains attr then
+          match obj with
+          | .instance _ => return .boundMethod obj attr
+          | _ => pure ()
+      if cd.name == "Timedelta" then
+        -- Properties
+        if ["days", "seconds", "microseconds"].contains attr then
+          match id_.attrs[attr]? with
+          | some v => return v
+          | none => pure ()
+        -- Methods
+        if ["total_seconds", "__str__", "__repr__"].contains attr then
+          match obj with
+          | .instance _ => return .boundMethod obj attr
+          | _ => pure ()
+      if cd.name == "Timezone" && ["__str__", "__repr__",
+            "tzname", "utcoffset"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "PurePath" then
+        -- Properties: call immediately and return the value
+        if ["name", "stem", "suffix", "parts"].contains attr then
+          match obj with
+          | .instance iref_ => return ← callPathMethod iref_ attr []
+          | _ => pure ()
+        -- parent returns a new PurePath instance
+        if attr == "parent" then
+          match obj with
+          | .instance iref_ => return ← callPathMethod iref_ "parent" []
+          | _ => pure ()
+        -- Methods: return as bound methods
+        if ["exists", "is_file", "is_dir", "resolve",
+            "read_text", "read_bytes", "__truediv__", "__str__",
+            "__repr__", "__fspath__", "with_suffix"].contains attr then
+          match obj with
+          | .instance _ => return .boundMethod obj attr
+          | _ => pure ()
+      if cd.name == "Logger" && ["debug", "info", "warning", "warn",
+            "error", "critical", "setLevel", "getChild", "addHandler",
+            "isEnabledFor", "getEffectiveLevel", "__repr__"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if (cd.name == "StreamHandler" || cd.name == "NullHandler" ||
+            cd.name == "Formatter") &&
+            ["setLevel", "setFormatter", "format", "emit", "close"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if (cd.name == "Lock" || cd.name == "RLock") && ["acquire", "release",
+            "locked", "__enter__", "__exit__"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "Event" && ["set", "clear", "is_set", "wait"].contains attr then
+        match obj with
+        | .instance _ => return .boundMethod obj attr
+        | _ => pure ()
+      if cd.name == "NamedTemporaryFile" && ["write", "read", "close",
+            "__enter__", "__exit__"].contains attr then
         match obj with
         | .instance _ => return .boundMethod obj attr
         | _ => pure ()
@@ -1668,6 +2017,136 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "token_bytes" (.builtin "secrets.token_bytes")
     ns := ns.insert "randbelow"   (.builtin "secrets.randbelow")
+    some <$> mkMod ns
+  | "sys" => do
+    let st ← get
+    let mut ns : Std.HashMap String Value := {}
+    -- sys.path from searchPaths
+    let pathArr := st.searchPaths.map (fun s => Value.str s)
+    let pathRef ← heapAlloc (.listObj pathArr)
+    ns := ns.insert "path" (.list pathRef)
+    -- sys.modules as dict
+    let mut modPairs : Array (Value × Value) := #[]
+    for (k, v) in st.loadedModules do
+      modPairs := modPairs.push (.str k, v)
+    let modsRef ← heapAlloc (.dictObj modPairs)
+    ns := ns.insert "modules" (.dict modsRef)
+    -- sys.argv
+    let argvRef ← heapAlloc (.listObj #[])
+    ns := ns.insert "argv" (.list argvRef)
+    -- sys.stdout / sys.stderr as TextIOWrapper instances
+    let mkTextIO (streamName : String) : InterpM Value := do
+      let mut attrs : Std.HashMap String Value := {}
+      attrs := attrs.insert "_name" (.str streamName)
+      let cls ← allocClassObj {
+        name := "TextIOWrapper", bases := #[], mro := #[], ns := {}, slots := none }
+      match cls with
+      | .classObj cref => heapSetClassData cref {
+          name := "TextIOWrapper", bases := #[], mro := #[cls], ns := {}, slots := none }
+      | _ => pure ()
+      let instRef ← heapAlloc (.instanceObjData { cls := cls, attrs := attrs })
+      return .instance instRef
+    ns := ns.insert "stdout" (← mkTextIO "stdout")
+    ns := ns.insert "stderr" (← mkTextIO "stderr")
+    ns := ns.insert "stdin"  (← mkTextIO "stdin")
+    -- sys.exit
+    ns := ns.insert "exit" (.builtin "sys.exit")
+    -- Constants
+    ns := ns.insert "maxsize"      (.int 9223372036854775807)
+    ns := ns.insert "version"      (.str "3.12.0 (LeanPython)")
+    ns := ns.insert "platform"     (.str "linux")
+    ns := ns.insert "byteorder"    (.str "little")
+    ns := ns.insert "executable"   (.str "leanpython")
+    ns := ns.insert "prefix"       (.str "/usr")
+    ns := ns.insert "exec_prefix"  (.str "/usr")
+    ns := ns.insert "version_info" (.tuple #[.int 3, .int 12, .int 0, .str "final", .int 0])
+    ns := ns.insert "getrecursionlimit" (.builtin "sys.getrecursionlimit")
+    ns := ns.insert "setrecursionlimit" (.builtin "sys.setrecursionlimit")
+    some <$> mkMod ns
+  | "os" => do
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "getcwd"  (.builtin "os.getcwd")
+    ns := ns.insert "getenv"  (.builtin "os.getenv")
+    ns := ns.insert "listdir" (.builtin "os.listdir")
+    ns := ns.insert "sep"     (.str "/")
+    ns := ns.insert "linesep" (.str "\n")
+    ns := ns.insert "name"    (.str "posix")
+    ns := ns.insert "curdir"  (.str ".")
+    ns := ns.insert "pardir"  (.str "..")
+    ns := ns.insert "extsep"  (.str ".")
+    -- os.environ as empty dict (simplified)
+    let envRef ← heapAlloc (.dictObj #[])
+    ns := ns.insert "environ" (.dict envRef)
+    -- os.path as submodule
+    if let some pathMod ← getBuiltinModule "os.path" then
+      ns := ns.insert "path" pathMod
+    some <$> mkMod ns
+  | "os.path" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "join"     (.builtin "os.path.join")
+    ns := ns.insert "exists"   (.builtin "os.path.exists")
+    ns := ns.insert "isfile"   (.builtin "os.path.isfile")
+    ns := ns.insert "isdir"    (.builtin "os.path.isdir")
+    ns := ns.insert "dirname"  (.builtin "os.path.dirname")
+    ns := ns.insert "basename" (.builtin "os.path.basename")
+    ns := ns.insert "abspath"  (.builtin "os.path.abspath")
+    ns := ns.insert "splitext" (.builtin "os.path.splitext")
+    ns := ns.insert "normpath" (.builtin "os.path.normpath")
+    ns := ns.insert "sep"      (.str "/")
+    some <$> mkMod ns
+  | "time" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "time"      (.builtin "time.time")
+    ns := ns.insert "monotonic" (.builtin "time.monotonic")
+    ns := ns.insert "sleep"     (.builtin "time.sleep")
+    some <$> mkMod ns
+  | "datetime" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "datetime"  (.builtin "datetime.datetime")
+    ns := ns.insert "timedelta" (.builtin "datetime.timedelta")
+    ns := ns.insert "timezone"  (.builtin "datetime.timezone")
+    ns := ns.insert "date"      (.builtin "datetime.date")
+    ns := ns.insert "time"      (.builtin "datetime.time_cls")
+    some <$> mkMod ns
+  | "pathlib" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "Path"     (.builtin "pathlib.Path")
+    ns := ns.insert "PurePath" (.builtin "pathlib.PurePath")
+    some <$> mkMod ns
+  | "logging" => do
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "getLogger"   (.builtin "logging.getLogger")
+    ns := ns.insert "basicConfig" (.builtin "logging.basicConfig")
+    ns := ns.insert "DEBUG"       (.int 10)
+    ns := ns.insert "INFO"        (.int 20)
+    ns := ns.insert "WARNING"     (.int 30)
+    ns := ns.insert "ERROR"       (.int 40)
+    ns := ns.insert "CRITICAL"    (.int 50)
+    ns := ns.insert "Logger"      (.builtin "logging.Logger")
+    ns := ns.insert "StreamHandler" (.builtin "logging.StreamHandler")
+    ns := ns.insert "Formatter"   (.builtin "logging.Formatter")
+    ns := ns.insert "NullHandler" (.builtin "logging.NullHandler")
+    some <$> mkMod ns
+  | "signal" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "signal"  (.builtin "signal.signal")
+    ns := ns.insert "SIGINT"  (.int 2)
+    ns := ns.insert "SIGTERM" (.int 15)
+    ns := ns.insert "SIGKILL" (.int 9)
+    ns := ns.insert "SIGHUP"  (.int 1)
+    ns := ns.insert "SIG_DFL" (.int 0)
+    ns := ns.insert "SIG_IGN" (.int 1)
+    some <$> mkMod ns
+  | "threading" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "Lock"  (.builtin "threading.Lock")
+    ns := ns.insert "RLock" (.builtin "threading.RLock")
+    ns := ns.insert "Event" (.builtin "threading.Event")
+    some <$> mkMod ns
+  | "tempfile" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "mkdtemp"            (.builtin "tempfile.mkdtemp")
+    ns := ns.insert "NamedTemporaryFile" (.builtin "tempfile.NamedTemporaryFile")
     some <$> mkMod ns
   | _ => return none
 
@@ -2398,6 +2877,37 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
       if cd_.name == "SHA256Hash" || cd_.name == "SHAKE128Hash" then
         return ← callHashMethod iref method args
       if cd_.name == "HMAC" then return ← callHmacMethod iref method args
+      if cd_.name == "TextIOWrapper" then return ← callTextIOWrapperMethod iref method args
+      if cd_.name == "Datetime" then return ← callDatetimeMethod iref method args
+      if cd_.name == "Timedelta" then return ← callTimedeltaMethod iref method args
+      if cd_.name == "Timezone" then return ← callTimezoneMethod iref method args
+      if cd_.name == "PurePath" then return ← callPathMethod iref method args
+      if cd_.name == "Logger" then return ← callLoggerMethod iref method args
+      -- Logging handler/formatter stubs (all methods are no-ops)
+      if cd_.name == "StreamHandler" || cd_.name == "NullHandler" ||
+            cd_.name == "Formatter" then
+        return .none
+      -- Threading Lock/RLock stubs
+      if cd_.name == "Lock" || cd_.name == "RLock" then
+        match method with
+        | "acquire" | "__enter__" => return .bool true
+        | "release" | "__exit__" => return .none
+        | "locked" => return .bool false
+        | _ => throwAttributeError s!"'{cd_.name}' object has no attribute '{method}'"
+      -- Threading Event stubs
+      if cd_.name == "Event" then
+        match method with
+        | "set" | "clear" => return .none
+        | "is_set" => return .bool false
+        | "wait" => return .bool true
+        | _ => throwAttributeError s!"'Event' object has no attribute '{method}'"
+      -- NamedTemporaryFile stubs
+      if cd_.name == "NamedTemporaryFile" then
+        match method with
+        | "write" | "read" | "close" => return .none
+        | "__enter__" => return .instance iref
+        | "__exit__" => return .none
+        | _ => throwAttributeError s!"'NamedTemporaryFile' object has no attribute '{method}'"
       let cd ← heapGetClassData cref
       let mut found : Option (Value × Value) := none  -- (function, defining class)
       for mroEntry in cd.mro do

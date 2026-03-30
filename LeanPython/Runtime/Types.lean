@@ -316,9 +316,8 @@ def exceptionMatches (errorTypeName handlerTypeName : String) : Bool :=
   if handlerTypeName == "BaseException" then true
   else if handlerTypeName == "Exception" then
     -- Exception catches everything except BaseException-only subtypes
-    -- (KeyboardInterrupt, SystemExit, GeneratorExit)
-    -- For now, all our errors are Exception subclasses
-    true
+    errorTypeName != "SystemExit" && errorTypeName != "KeyboardInterrupt" &&
+    errorTypeName != "GeneratorExit"
   else
     errorTypeName == handlerTypeName
 
@@ -344,7 +343,8 @@ def builtinNames : List String :=
    "AttributeError", "OverflowError", "StopIteration",
    "NotImplementedError", "Exception", "BaseException",
    "NameError", "OSError", "IOError", "FileNotFoundError",
-   "ImportError", "ModuleNotFoundError"]
+   "ImportError", "ModuleNotFoundError", "SystemExit",
+   "KeyboardInterrupt", "GeneratorExit"]
 
 /-- Check if a name is a built-in function. -/
 def isBuiltinName (name : String) : Bool :=

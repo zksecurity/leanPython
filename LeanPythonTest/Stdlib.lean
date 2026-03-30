@@ -436,3 +436,191 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- secrets.randbelow returns int in range
 #eval assertPy "import secrets\nfor _ in range(10):\n    x = secrets.randbelow(100)\n    assert 0 <= x < 100\nprint('ok')" "ok\n"
+
+-- ============================================================
+-- sys module tests
+-- ============================================================
+
+-- sys.path is a list
+#eval assertPy "import sys\nprint(type(sys.path))" "<class 'list'>\n"
+
+-- sys.argv is a list
+#eval assertPy "import sys\nprint(type(sys.argv))" "<class 'list'>\n"
+
+-- sys.version is a string
+#eval assertPy "import sys\nprint(type(sys.version))" "<class 'str'>\n"
+
+-- sys.maxsize is a positive integer
+#eval assertPy "import sys\nprint(sys.maxsize > 0)" "True\n"
+
+-- sys.platform is a string
+#eval assertPy "import sys\nprint(type(sys.platform))" "<class 'str'>\n"
+
+-- sys.version_info is a tuple
+#eval assertPy "import sys\nprint(sys.version_info[0])" "3\n"
+
+-- sys.byteorder
+#eval assertPy "import sys\nprint(sys.byteorder)" "little\n"
+
+-- sys.stdout.write
+#eval assertPy "import sys\nsys.stdout.write('hello')\nprint()" "hello\n"
+
+-- sys.exit raises SystemExit
+#eval assertPyError "import sys\nsys.exit(1)" "SystemExit"
+
+-- sys.getrecursionlimit
+#eval assertPy "import sys\nprint(sys.getrecursionlimit() > 0)" "True\n"
+
+-- ============================================================
+-- os module tests
+-- ============================================================
+
+-- os.getcwd returns a string
+#eval assertPy "import os\nprint(type(os.getcwd()))" "<class 'str'>\n"
+
+-- os.sep
+#eval assertPy "import os\nprint(os.sep)" "/\n"
+
+-- os.name
+#eval assertPy "import os\nprint(os.name)" "posix\n"
+
+-- os.path.join
+#eval assertPy "import os\nprint(os.path.join('a', 'b'))" "a/b\n"
+#eval assertPy "import os\nprint(os.path.join('a', 'b', 'c'))" "a/b/c\n"
+#eval assertPy "import os\nprint(os.path.join('a', '/b'))" "/b\n"
+
+-- os.path.basename
+#eval assertPy "import os\nprint(os.path.basename('/foo/bar.py'))" "bar.py\n"
+
+-- os.path.dirname
+#eval assertPy "import os\nprint(os.path.dirname('/foo/bar.py'))" "/foo\n"
+
+-- os.path.splitext
+#eval assertPy "import os\nprint(os.path.splitext('test.py'))" "('test', '.py')\n"
+#eval assertPy "import os\nprint(os.path.splitext('noext'))" "('noext', '')\n"
+
+-- os.path submodule import
+#eval assertPy "import os.path\nprint(os.path.join('x', 'y'))" "x/y\n"
+
+-- os.path.exists on current directory
+#eval assertPy "import os\nprint(os.path.isdir('.'))" "True\n"
+
+-- ============================================================
+-- time module tests
+-- ============================================================
+
+-- time.time returns positive float
+#eval assertPy "import time\nt = time.time()\nprint(t > 0)" "True\n"
+
+-- time.monotonic returns non-negative float
+#eval assertPy "import time\nt = time.monotonic()\nprint(t >= 0)" "True\n"
+
+-- time.time returns float type
+#eval assertPy "import time\nprint(type(time.time()))" "<class 'float'>\n"
+
+-- ============================================================
+-- datetime module tests
+-- ============================================================
+
+-- timedelta total_seconds
+#eval assertPy "from datetime import timedelta\nd = timedelta(days=1)\nprint(d.total_seconds())" "86400.000000\n"
+
+-- timedelta with seconds
+#eval assertPy "from datetime import timedelta\nd = timedelta(seconds=3661)\nprint(d.total_seconds())" "3661.000000\n"
+
+-- timedelta with days and seconds
+#eval assertPy "from datetime import timedelta\nd = timedelta(days=1, seconds=30)\nprint(d.total_seconds())" "86430.000000\n"
+
+-- datetime constructor
+#eval assertPy "from datetime import datetime\ndt = datetime(2024, 1, 15)\nprint(dt.isoformat())" "2024-01-15T00:00:00\n"
+
+-- datetime with time
+#eval assertPy "from datetime import datetime\ndt = datetime(2024, 1, 15, 10, 30, 45)\nprint(dt.isoformat())" "2024-01-15T10:30:45\n"
+
+-- timezone.utc
+#eval assertPy "from datetime import timezone\nprint(timezone.utc)" "UTC\n"
+
+-- ============================================================
+-- pathlib module tests
+-- ============================================================
+
+-- Path name
+#eval assertPy "from pathlib import Path\np = Path('/foo/bar.txt')\nprint(p.name)" "bar.txt\n"
+
+-- Path suffix
+#eval assertPy "from pathlib import Path\np = Path('/foo/bar.txt')\nprint(p.suffix)" ".txt\n"
+
+-- Path stem
+#eval assertPy "from pathlib import Path\np = Path('/foo/bar.txt')\nprint(p.stem)" "bar\n"
+
+-- Path parent
+#eval assertPy "from pathlib import Path\np = Path('/foo/bar.txt')\nprint(p.parent)" "/foo\n"
+
+-- Path / operator
+#eval assertPy "from pathlib import Path\np = Path('/foo') / 'bar'\nprint(p)" "/foo/bar\n"
+
+-- Path str
+#eval assertPy "from pathlib import Path\np = Path('/foo/bar')\nprint(str(p))" "/foo/bar\n"
+
+-- Path exists on current dir
+#eval assertPy "from pathlib import Path\np = Path('.')\nprint(p.is_dir())" "True\n"
+
+-- ============================================================
+-- logging module tests
+-- ============================================================
+
+-- getLogger returns Logger instance
+#eval assertPy "import logging\nlogger = logging.getLogger('test')\nprint(type(logger))" "<class 'Logger'>\n"
+
+-- basicConfig is no-op
+#eval assertPy "import logging\nlogging.basicConfig()\nprint('ok')" "ok\n"
+
+-- Logger level constants
+#eval assertPy "import logging\nprint(logging.DEBUG)" "10\n"
+#eval assertPy "import logging\nprint(logging.WARNING)" "30\n"
+
+-- Logger warning emits output
+#eval assertPy "import logging\nlogger = logging.getLogger('test')\nlogger.warning('hello')" "WARNING:test:hello\n"
+
+-- Logger debug suppressed by default (level=WARNING)
+#eval assertPy "import logging\nlogger = logging.getLogger('test')\nlogger.debug('hidden')\nprint('ok')" "ok\n"
+
+-- Logger setLevel
+#eval assertPy "import logging\nlogger = logging.getLogger('test')\nlogger.setLevel(logging.DEBUG)\nlogger.debug('visible')" "DEBUG:test:visible\n"
+
+-- ============================================================
+-- signal module tests
+-- ============================================================
+
+-- signal constants
+#eval assertPy "import signal\nprint(signal.SIGINT)" "2\n"
+#eval assertPy "import signal\nprint(signal.SIGTERM)" "15\n"
+
+-- signal.signal is no-op returning handler
+#eval assertPy "import signal\ndef handler(s, f):\n    pass\nresult = signal.signal(signal.SIGINT, handler)\nprint('ok')" "ok\n"
+
+-- ============================================================
+-- threading module tests
+-- ============================================================
+
+-- Lock acquire/release
+#eval assertPy "import threading\nlock = threading.Lock()\nlock.acquire()\nlock.release()\nprint('ok')" "ok\n"
+
+-- Lock as context manager
+#eval assertPy "import threading\nlock = threading.Lock()\nwith lock:\n    print('locked')" "locked\n"
+
+-- RLock
+#eval assertPy "import threading\nlock = threading.RLock()\nlock.acquire()\nlock.release()\nprint('ok')" "ok\n"
+
+-- ============================================================
+-- tempfile module tests
+-- ============================================================
+
+-- mkdtemp returns string
+#eval assertPy "import tempfile\nd = tempfile.mkdtemp()\nprint(type(d))" "<class 'str'>\n"
+
+-- mkdtemp returns path starting with /tmp
+#eval assertPy "import tempfile\nd = tempfile.mkdtemp()\nprint(d.startswith('/tmp'))" "True\n"
+
+-- NamedTemporaryFile has name attribute
+#eval assertPy "import tempfile\nf = tempfile.NamedTemporaryFile()\nprint(type(f.name))" "<class 'str'>\n"

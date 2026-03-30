@@ -7,3 +7,9 @@ import LeanPython.Stdlib.Json
 import LeanPython.Stdlib.Hashlib
 import LeanPython.Stdlib.Hmac
 import LeanPython.Stdlib.Secrets
+import LeanPython.Stdlib.Sys
+import LeanPython.Stdlib.Os
+import LeanPython.Stdlib.Time
+import LeanPython.Stdlib.Datetime
+import LeanPython.Stdlib.Pathlib
+import LeanPython.Stdlib.Logging

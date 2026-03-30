@@ -8,6 +8,12 @@ import LeanPython.Stdlib.Json
 import LeanPython.Stdlib.Hashlib
 import LeanPython.Stdlib.Hmac
 import LeanPython.Stdlib.Secrets
+import LeanPython.Stdlib.Sys
+import LeanPython.Stdlib.Os
+import LeanPython.Stdlib.Time
+import LeanPython.Stdlib.Datetime
+import LeanPython.Stdlib.Pathlib
+import LeanPython.Stdlib.Logging
 
 set_option autoImplicit false
 
@@ -24,6 +30,10 @@ open LeanPython.Stdlib.Json
 open LeanPython.Stdlib.Hashlib
 open LeanPython.Stdlib.Hmac
 open LeanPython.Stdlib.Secrets
+open LeanPython.Stdlib.Sys
+open LeanPython.Stdlib.Os
+open LeanPython.Stdlib.Time
+open LeanPython.Stdlib.Logging
 
 -- ============================================================
 -- Individual builtin implementations
@@ -834,6 +844,51 @@ partial def callBuiltin (name : String) (args : List Value)
   -- ============================================================
   | "json.dumps" => jsonDumps args kwargs
   | "json.loads" => jsonLoads args
+  -- ============================================================
+  -- sys module functions
+  -- ============================================================
+  | "sys.exit" => sysExit args
+  -- ============================================================
+  -- os module functions
+  -- ============================================================
+  | "os.getcwd" => osGetcwd args
+  | "os.getenv" => osGetenv args
+  | "os.listdir" => osListdir args
+  -- ============================================================
+  -- os.path module functions
+  -- ============================================================
+  | "os.path.join" => osPathJoin args
+  | "os.path.exists" => osPathExists args
+  | "os.path.isfile" => osPathIsfile args
+  | "os.path.isdir" => osPathIsdir args
+  | "os.path.dirname" => osPathDirname args
+  | "os.path.basename" => osPathBasename args
+  | "os.path.abspath" => osPathAbspath args
+  | "os.path.splitext" => osPathSplitExt args
+  | "os.path.normpath" => osPathNormpath args
+  -- ============================================================
+  -- time module functions
+  -- ============================================================
+  | "time.time" => timeTime args
+  | "time.monotonic" => timeMonotonic args
+  | "time.sleep" => timeSleep args
+  -- ============================================================
+  -- logging module functions
+  -- ============================================================
+  | "logging.basicConfig" => loggingBasicConfig args kwargs
+  -- ============================================================
+  -- signal module stubs
+  -- ============================================================
+  | "signal.signal" =>
+    match args with
+    | [_, handler] => return handler
+    | _ => return .none
+  -- ============================================================
+  -- tempfile module stubs
+  -- ============================================================
+  | "tempfile.mkdtemp" => do
+    let suffix ← (IO.rand 100000 999999 : IO Nat)
+    return .str s!"/tmp/leanpy_{suffix}"
   | _ => throwNotImplemented s!"builtin '{name}' is not implemented"
 
 end LeanPython.Runtime.Builtins

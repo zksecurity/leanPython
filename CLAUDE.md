@@ -56,6 +56,12 @@ LeanPython/
     Hashlib.lean     — hashlib: SHA-256, SHAKE-128 (pure Lean4), hash object dispatch
     Hmac.lean        — hmac: HMAC-SHA256, HMAC object dispatch
     Secrets.lean     — secrets: token_bytes, randbelow (using IO.rand)
+    Sys.lean         — sys: exit, TextIOWrapper for stdout/stderr
+    Os.lean          — os: getcwd, getenv, listdir; os.path: join, exists, dirname, etc.
+    Time.lean        — time: time, monotonic, sleep
+    Datetime.lean    — datetime: datetime, timedelta, timezone classes
+    Pathlib.lean     — pathlib: Path class with name/parent/stem/suffix/exists/etc.
+    Logging.lean     — logging: Logger, getLogger, basicConfig, level constants
 Main.lean            — CLI entry point (reads .py file, parses, interprets)
 LeanPythonTest.lean      — test driver root
 LeanPythonTest/
