@@ -16,6 +16,8 @@ structure PydanticConfig where
   extra : String := "ignore"    -- "ignore" | "allow" | "forbid"
   strict : Bool := false
   populateByName : Bool := false
+  validateDefault : Bool := false
+  arbitraryTypesAllowed : Bool := false
 
 instance : Inhabited PydanticConfig where
   default := {}
@@ -29,6 +31,8 @@ def parsePydanticConfigFromPairs (pairs : Array (Value × Value)) : PydanticConf
     | .str "extra", .str s => { cfg with extra := s }
     | .str "strict", .bool b => { cfg with strict := b }
     | .str "populate_by_name", .bool b => { cfg with populateByName := b }
+    | .str "validate_default", .bool b => { cfg with validateDefault := b }
+    | .str "arbitrary_types_allowed", .bool b => { cfg with arbitraryTypesAllowed := b }
     | _, _ => cfg
   ) {}
 

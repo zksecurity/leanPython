@@ -916,6 +916,23 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         pairs := pairs.push (.str "type", .str "plain-serializer")
         pairs := pairs.push (.str "function", func)
         allocDict pairs
+      else if name == "pydantic.alias_generators.to_camel" then do
+        -- to_camel("snake_case") → "snakeCase"
+        match args with
+        | [.str s] =>
+          let parts := s.splitOn "_"
+          let result := match parts with
+          | [] => ""
+          | first :: rest =>
+            let capitalized := rest.map fun part =>
+              if part.isEmpty then ""
+              else
+                let firstChar := part.toList.head!
+                let restChars := String.ofList (part.toList.drop 1)
+                s!"{firstChar.toUpper}{restChars}"
+            first ++ String.join capitalized
+          return .str result
+        | _ => throwTypeError "to_camel() takes exactly one string argument"
       else if name == "pydantic_core.CoreSchema" || name == "pydantic.GetCoreSchemaHandler" then
         -- Stub type: just return None (used only for type annotations)
         return .none
@@ -1339,6 +1356,61 @@ partial def callValueDispatch (callee : Value) (args : List Value)
                         if k == fname then (k, validatedVal) else (k, v)
                     | none => pure ()
                   | _, _ => pure ()
+              | _ => pure ()
+          | _ => pure ()
+          -- Resolve aliases: map aliased kwarg names back to Python field names
+          let fieldNameStrs ← match cd.ns["__pydantic_field_names__"]? with
+            | some (.list fnRef) => do
+              let fnArr ← heapGetList fnRef
+              pure (fnArr.toList.filterMap fun | .str s => some s | _ => none)
+            | _ => pure ([] : List String)
+          match cd.ns["__pydantic_alias_generator__"]? with
+          | some agFn => do
+            -- Build alias-to-field map
+            let mut aliasToField : List (String × String) := []
+            for fname in fieldNameStrs do
+              let aliasVal ← callValueDispatch agFn [.str fname] []
+              match aliasVal with
+              | .str aliasName =>
+                if aliasName != fname then
+                  aliasToField := aliasToField ++ [(aliasName, fname)]
+              | _ => pure ()
+            -- Remap kwargs: alias → field name (only for keys not already a field name)
+            let populateByName := cd.ns["__pydantic_populate_by_name__"]? == some (.bool true)
+            let mut kw' : List (String × Value) := []
+            for (kwName, kwVal) in kw do
+              if fieldNameStrs.contains kwName then
+                kw' := kw' ++ [(kwName, kwVal)]
+              else
+                match aliasToField.find? (fun (a, _) => a == kwName) with
+                | some (_, fname) =>
+                  if populateByName || !fieldNameStrs.contains kwName then
+                    kw' := kw' ++ [(fname, kwVal)]
+                  else
+                    kw' := kw' ++ [(kwName, kwVal)]
+                | none => kw' := kw' ++ [(kwName, kwVal)]
+            kw := kw'
+          | none => pure ()
+          -- extra="forbid": reject unknown keyword arguments
+          match cd.ns["__pydantic_extra__"]? with
+          | some (.str "forbid") => do
+            for (kwName, _) in kw do
+              if !fieldNameStrs.contains kwName then
+                throwValueError s!"Unexpected keyword argument '{kwName}' for {cd.name} (extra fields not permitted)"
+          | _ => pure ()
+          -- Apply __get_pydantic_core_schema__ field validation
+          match cd.ns["__pydantic_field_schemas__"]? with
+          | some (.dict fsRef) => do
+            let fsPairs ← heapGetDict fsRef
+            for (fnameV, schema) in fsPairs do
+              match fnameV with
+              | .str fname =>
+                match kw.find? (fun (k, _) => k == fname) with
+                | some (_, fieldVal) =>
+                  let validated ← evalCoreSchema schema fieldVal
+                  kw := kw.map fun (k, v) =>
+                    if k == fname then (k, validated) else (k, v)
+                | none => pure ()
               | _ => pure ()
           | _ => pure ()
           pure (args, kw)
@@ -2382,6 +2454,10 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "FieldInfo" (.builtin "pydantic.FieldInfo")
     some <$> mkMod ns
+  | "pydantic.alias_generators" => do
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "to_camel" (.builtin "pydantic.alias_generators.to_camel")
+    some <$> mkMod ns
   | "pydantic.annotated_handlers" => do
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "GetCoreSchemaHandler" (.builtin "pydantic.GetCoreSchemaHandler")
@@ -2568,7 +2644,8 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     -- Record annotation in __annotations__ dict if in scope
     match target with
     | .name n _ => do
-      let annStr ← valueToStr (← evalExpr ann)
+      let annVal ← evalExpr ann
+      let annStr ← valueToStr annVal
       let annDict ← do
         try
           let existing ← lookupVariable "__annotations__"
@@ -2586,6 +2663,26 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
             found := true
             break
         if !found then newPairs := newPairs.push (key, .str annStr)
+        heapSetDict ref newPairs
+      | _ => pure ()
+      -- Also store raw annotation value for Pydantic core_schema hooks
+      let rawDict ← do
+        try
+          let existing ← lookupVariable "__annotations_raw__"
+          pure existing
+        catch _ => pure .none
+      match rawDict with
+      | .dict ref => do
+        let pairs ← heapGetDict ref
+        let key := Value.str n
+        let mut newPairs := pairs
+        let mut found := false
+        for i in [:pairs.size] do
+          if Value.beq pairs[i]!.1 key then
+            newPairs := newPairs.set! i (key, annVal)
+            found := true
+            break
+        if !found then newPairs := newPairs.push (key, annVal)
         heapSetDict ref newPairs
       | _ => pure ()
     | _ => pure ()
@@ -2723,6 +2820,9 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     -- Initialize __annotations__ dict for the class body
     let annRef ← heapAlloc (.dictObj #[])
     setVariable "__annotations__" (.dict annRef)
+    -- Initialize __annotations_raw__ dict for Pydantic core_schema hooks
+    let annRawRef ← heapAlloc (.dictObj #[])
+    setVariable "__annotations_raw__" (.dict annRawRef)
     try execStmts cd.body
     catch
     | .control _ => pure ()
@@ -4204,12 +4304,51 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
   for name in ownFieldNames do
     allFields := allFields ++ [(name, cd.ns[name]?)]
   let allFieldNames := allFields.map Prod.fst
-  -- 4. Parse model_config
-  let config ← match cd.ns["model_config"]? with
-    | some (.dict configRef) => do
+  -- 4. Parse model_config (walk MRO to find it if not in own namespace)
+  let modelConfigDict ← do
+    match cd.ns["model_config"]? with
+    | some (.dict configRef) => pure (some configRef)
+    | _ => do
+      let mut found : Option HeapRef := none
+      for mroEntry in cd.mro do
+        if found.isSome then break
+        match mroEntry with
+        | .classObj mref => do
+          if mref == cref then continue
+          let mcd ← heapGetClassData mref
+          match mcd.ns["model_config"]? with
+          | some (.dict ref) => found := some ref
+          | _ => pure ()
+        | _ => pure ()
+      pure found
+  let configAndAlias : PydanticConfig × Option Value ← match modelConfigDict with
+    | some configRef => do
       let pairs ← heapGetDict configRef
-      pure (parsePydanticConfigFromPairs pairs)
-    | _ => pure ({} : PydanticConfig)
+      let cfg := parsePydanticConfigFromPairs pairs
+      -- Extract alias_generator (a callable, not stored in PydanticConfig)
+      let agFn := (pairs.toList.find? fun (k, _) =>
+        Value.beq k (.str "alias_generator")).map Prod.snd
+      pure (cfg, agFn)
+    | none => pure (default, none)
+  let config := configAndAlias.1
+  let aliasGenFn := configAndAlias.2
+  -- 4a-inherit. Inherit alias_generator from parent if not set
+  let aliasGen ← match aliasGenFn with
+    | some fn => pure (some fn)
+    | none => do
+      let mut inherited : Option Value := none
+      for mroEntry in cd.mro do
+        if inherited.isSome then break
+        match mroEntry with
+        | .classObj mref => do
+          if mref == cref then continue
+          let mcd ← heapGetClassData mref
+          if mcd.ns["__pydantic_model__"]? != some (.bool true) then continue
+          match mcd.ns["__pydantic_alias_generator__"]? with
+          | some fn => inherited := some fn
+          | none => pure ()
+        | _ => pure ()
+      pure inherited
   -- 4b. Scan namespace for validator/serializer marker tuples
   let mut fieldValidators : Array (String × String × Value) := #[]
   let mut modelValidatorsBefore : Array Value := #[]
@@ -4348,6 +4487,11 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
   -- Store config
   nsUpdated := nsUpdated.insert "__pydantic_frozen__" (.bool config.frozen)
   nsUpdated := nsUpdated.insert "__pydantic_extra__" (.str config.extra)
+  nsUpdated := nsUpdated.insert "__pydantic_populate_by_name__" (.bool config.populateByName)
+  -- Store alias_generator if present
+  match aliasGen with
+  | some fn => nsUpdated := nsUpdated.insert "__pydantic_alias_generator__" fn
+  | none => pure ()
   -- Store validators/serializers
   nsUpdated := nsUpdated.insert "__pydantic_field_validators__" (.list fvRef)
   nsUpdated := nsUpdated.insert "__pydantic_model_validators_before__" (.list mvbRef)
@@ -4366,6 +4510,52 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
     mfPairs := mfPairs.push (.str name, infoDict)
   let mfDict ← allocDict mfPairs
   nsUpdated := nsUpdated.insert "model_fields" mfDict
+  -- 6b. Build __get_pydantic_core_schema__ field schema map
+  -- For each field, check if the annotation type has __get_pydantic_core_schema__
+  let rawAnns ← match cd.ns["__annotations_raw__"]? with
+    | some (.dict ref) => heapGetDict ref
+    | _ => pure #[]
+  let mut fieldSchemaPairs : Array (Value × Value) := #[]
+  for (nameV, typeV) in rawAnns do
+    match nameV with
+    | .str fname =>
+      -- Check if the type has __get_pydantic_core_schema__ (walk MRO)
+      let schemaOpt ← match typeV with
+        | .classObj tref => do
+          let tcd ← heapGetClassData tref
+          -- Walk MRO to find __get_pydantic_core_schema__
+          let mut hookFound : Option Value := none
+          for mroEntry in tcd.mro do
+            if hookFound.isSome then break
+            match mroEntry with
+            | .classObj mref => do
+              let mcd ← heapGetClassData mref
+              if let some fn := mcd.ns["__get_pydantic_core_schema__"]? then
+                hookFound := some fn
+            | _ => pure ()
+          -- Also check own namespace (for classes without full MRO)
+          if hookFound.isNone then
+            hookFound := tcd.ns["__get_pydantic_core_schema__"]?
+          match hookFound with
+          | some hookFn => do
+            -- Unwrap classmethod to get raw function, then call with (cls, source_type, handler)
+            let rawFn := match hookFn with
+              | .classMethod inner => inner
+              | other => other
+            let result ← try
+              let schema ← callValueDispatch rawFn [typeV, typeV, .none] []
+              pure (some schema)
+            catch _ => pure none
+            pure result
+          | none => pure none
+        | _ => pure none
+      match schemaOpt with
+      | some schema => fieldSchemaPairs := fieldSchemaPairs.push (.str fname, schema)
+      | none => pure ()
+    | _ => pure ()
+  if !fieldSchemaPairs.isEmpty then do
+    let fsDict ← allocDict fieldSchemaPairs
+    nsUpdated := nsUpdated.insert "__pydantic_field_schemas__" fsDict
   -- 7. Merge own annotations with inherited for full __annotations__ dict
   let mut fullAnnPairs := inheritedAnnPairs
   match cd.ns["__annotations__"]? with
@@ -4623,12 +4813,25 @@ partial def callPydanticModelDump (iref : HeapRef) (cref : HeapRef)
   let cd ← heapGetClassData cref
   let mode := match kwargs.find? (fun (k, _) => k == "mode") with
     | some (_, .str m) => m | _ => "python"
+  let byAlias := match kwargs.find? (fun (k, _) => k == "by_alias") with
+    | some (_, .bool b) => b | _ => false
   -- Get field names
   let fieldNames ← match cd.ns["__pydantic_field_names__"]? with
     | some (.list fnRef) => do
       let fnArr ← heapGetList fnRef
       pure (fnArr.toList.filterMap fun v => match v with | .str s => some s | _ => none)
     | _ => pure ([] : List String)
+  -- Build alias map if by_alias=True and alias_generator is present
+  let mut aliasMap : List (String × String) := []
+  if byAlias then
+    match cd.ns["__pydantic_alias_generator__"]? with
+    | some agFn => do
+      for fname in fieldNames do
+        let aliasVal ← callValueDispatch agFn [.str fname] []
+        match aliasVal with
+        | .str aliasName => aliasMap := aliasMap ++ [(fname, aliasName)]
+        | _ => aliasMap := aliasMap ++ [(fname, fname)]
+    | none => pure ()
   -- Collect field serializers for json mode
   let mut serializerMap : List (String × Value) := []
   if mode == "json" then
@@ -4655,7 +4858,11 @@ partial def callPydanticModelDump (iref : HeapRef) (cref : HeapRef)
           -- Call serializer: serializer(self, value, _info)
           callValueDispatch serFn [inst, v, .none] []
         | none => pure v
-      pairs := pairs.push (.str name, serialized)
+      -- Use alias if by_alias=True
+      let key := match aliasMap.find? (fun (f, _) => f == name) with
+        | some (_, aliasName) => aliasName
+        | none => name
+      pairs := pairs.push (.str key, serialized)
     | none => pure ()
   -- Check for model_serializer
   if mode == "json" then

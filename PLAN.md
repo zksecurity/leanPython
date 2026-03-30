@@ -778,7 +778,8 @@ For non-deterministic tests, structural equivalence is checked.
 | 7d | Stdlib: system/OS | Done (sys, os/os.path, time, datetime, pathlib, logging, signal stub, threading stub, tempfile stub) |
 | 8a | Pydantic: foundation | Done (BaseModel, ConfigDict, model_copy, model_dump, model_fields, frozen, inheritance) |
 | 8b | Pydantic: validators, serializers, core_schema | Done (field_validator, model_validator before/after, field_serializer, model_serializer, pydantic_core.core_schema module, evalCoreSchema engine, validator inheritance) |
-| 8c-e | Pydantic: advanced features | Not started |
+| 8c | Pydantic: advanced features for leanSpec | Done (extra="forbid" enforcement, alias_generator/to_camel, populate_by_name, model_dump by_alias, ConfigDict MRO inheritance, __get_pydantic_core_schema__ hook, validate_default/arbitrary_types_allowed parsing) |
+| 8d-e | Pydantic: remaining advanced features | Not started |
 | 9a | leanSpec: types | Not started |
 | 9b | leanSpec: SSZ merkleization | Not started |
 | 9c | leanSpec: consensus containers | Not started |

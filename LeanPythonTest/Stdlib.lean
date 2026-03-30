@@ -692,3 +692,46 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- core_schema.chain_schema returns dict
 #eval assertPy "from pydantic_core import core_schema\ns = core_schema.chain_schema([core_schema.int_schema()])\nprint(s['type'])" "chain\n"
+
+-- ============================================================
+-- Phase 8c: Pydantic advanced features
+-- ============================================================
+
+-- extra="forbid" rejects unknown kwargs
+#eval assertPyError "from pydantic import BaseModel, ConfigDict\nclass M(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    x: int = 0\nM(x=1, y=2)" "extra fields not permitted"
+
+-- extra="forbid" accepts known fields
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nclass M(BaseModel):\n    model_config = ConfigDict(extra='forbid')\n    x: int = 0\nm = M(x=42)\nprint(m.x)" "42\n"
+
+-- to_camel converts snake_case to camelCase
+#eval assertPy "from pydantic.alias_generators import to_camel\nprint(to_camel('current_slot'))\nprint(to_camel('parent_root'))\nprint(to_camel('hello'))\nprint(to_camel('a_b_c'))" "currentSlot\nparentRoot\nhello\naBC\n"
+
+-- alias_generator with model_dump(by_alias=True)
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nfrom pydantic.alias_generators import to_camel\nclass M(BaseModel):\n    model_config = ConfigDict(alias_generator=to_camel)\n    current_slot: int = 0\nm = M(current_slot=42)\nd = m.model_dump(by_alias=True)\nprint(d['currentSlot'])" "42\n"
+
+-- model_dump without by_alias uses Python field names
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nfrom pydantic.alias_generators import to_camel\nclass M(BaseModel):\n    model_config = ConfigDict(alias_generator=to_camel)\n    current_slot: int = 0\nm = M(current_slot=42)\nd = m.model_dump()\nprint(d['current_slot'])" "42\n"
+
+-- populate_by_name accepts both alias and field name
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nfrom pydantic.alias_generators import to_camel\nclass M(BaseModel):\n    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)\n    current_slot: int = 0\nm = M(currentSlot=42)\nprint(m.current_slot)" "42\n"
+
+-- ConfigDict merge via | operator (leanSpec pattern)
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nfrom pydantic.alias_generators import to_camel\nclass CamelModel(BaseModel):\n    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)\nclass StrictModel(CamelModel):\n    model_config = CamelModel.model_config | {'extra': 'forbid', 'frozen': True}\n    x: int = 0\nm = StrictModel(x=5)\nprint(m.x)\nd = m.model_dump(by_alias=True)\nprint(d['x'])" "5\n5\n"
+
+-- Inheritance: alias_generator inherited from parent
+#eval assertPy "from pydantic import BaseModel, ConfigDict\nfrom pydantic.alias_generators import to_camel\nclass CamelModel(BaseModel):\n    model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)\nclass Child(CamelModel):\n    my_field: int = 0\nm = Child(my_field=10)\nd = m.model_dump(by_alias=True)\nprint(d['myField'])" "10\n"
+
+-- __get_pydantic_core_schema__ hook validates field values
+#eval assertPy "from pydantic import BaseModel\nfrom pydantic_core import core_schema\ndef make_positive(v):\n    if v < 0:\n        raise ValueError('must be positive')\n    return v\nclass Positive:\n    @classmethod\n    def __get_pydantic_core_schema__(cls, source_type, handler):\n        return core_schema.no_info_plain_validator_function(make_positive)\nclass M(BaseModel):\n    value: Positive = 0\nm = M(value=42)\nprint(m.value)" "42\n"
+
+-- __get_pydantic_core_schema__ hook rejects invalid values
+#eval assertPyError "from pydantic import BaseModel\nfrom pydantic_core import core_schema\ndef make_positive(v):\n    if v < 0:\n        raise ValueError('must be positive')\n    return v\nclass Positive:\n    @classmethod\n    def __get_pydantic_core_schema__(cls, source_type, handler):\n        return core_schema.no_info_plain_validator_function(make_positive)\nclass M(BaseModel):\n    value: Positive = 0\nM(value=-5)" "must be positive"
+
+-- __get_pydantic_core_schema__ with int_schema constraints
+#eval assertPy "from pydantic import BaseModel\nfrom pydantic_core import core_schema\nclass BoundedInt:\n    @classmethod\n    def __get_pydantic_core_schema__(cls, source_type, handler):\n        return core_schema.int_schema(ge=0, lt=100)\nclass M(BaseModel):\n    x: BoundedInt = 0\nm = M(x=50)\nprint(m.x)" "50\n"
+
+-- __get_pydantic_core_schema__ rejects out-of-range
+#eval assertPyError "from pydantic import BaseModel\nfrom pydantic_core import core_schema\nclass BoundedInt:\n    @classmethod\n    def __get_pydantic_core_schema__(cls, source_type, handler):\n        return core_schema.int_schema(ge=0, lt=100)\nclass M(BaseModel):\n    x: BoundedInt = 0\nM(x=200)" "200 >= maximum 100"
+
+-- __get_pydantic_core_schema__ classmethod is callable and returns schema
+#eval assertPy "from pydantic_core import core_schema\nclass BoundedInt:\n    @classmethod\n    def __get_pydantic_core_schema__(cls, source_type, handler):\n        return core_schema.int_schema(ge=0, lt=100)\nresult = BoundedInt.__get_pydantic_core_schema__(None, None)\nprint(result['type'])" "int\n"
