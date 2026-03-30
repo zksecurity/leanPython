@@ -771,7 +771,7 @@ For non-deterministic tests, structural equivalence is checked.
 | 3 | Core interpreter (expressions, types) | Done |
 | 4 | Control flow and functions | Done |
 | 5 | Object model (classes, inheritance) | Done (5A: core, 5B: dunders/decorators, 5C: C3 MRO/\_\_new\_\_/attr hooks/dataclass) |
-| 6 | Module system | Not started |
+| 6 | Module system | Done |
 | 7a | Stdlib: core utilities | Not started |
 | 7b | Stdlib: data handling | Not started |
 | 7c | Stdlib: cryptography | Not started |

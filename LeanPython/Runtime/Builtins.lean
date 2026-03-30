@@ -539,7 +539,8 @@ partial def callBuiltin (name : String) (args : List Value)
   | "RuntimeError" | "ZeroDivisionError" | "AssertionError"
   | "AttributeError" | "OverflowError" | "StopIteration"
   | "NotImplementedError" | "Exception" | "BaseException"
-  | "NameError" | "OSError" | "IOError" | "FileNotFoundError" => do
+  | "NameError" | "OSError" | "IOError" | "FileNotFoundError"
+  | "ImportError" | "ModuleNotFoundError" => do
     let msg ← match args with
       | [] => pure ""
       | [v] => valueToStr v

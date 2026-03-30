@@ -96,6 +96,7 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .staticMethod _ => return true
   | .classMethod _ => return true
   | .property _ _ _ => return true
+  | .module _ => return true
 
 -- ============================================================
 -- Deep equality (for == operator)
@@ -195,6 +196,11 @@ partial def valueToStr (v : Value) : InterpM String :=
   | .staticMethod _ => return "<staticmethod object>"
   | .classMethod _ => return "<classmethod object>"
   | .property _ _ _ => return "<property object>"
+  | .module ref => do
+    let md ← heapGetModuleData ref
+    match md.file with
+    | some f => return s!"<module '{md.name}' from '{f}'>"
+    | none => return s!"<module '{md.name}' (built-in)>"
   | .tuple elems => do
     let strs ← elems.toList.mapM valueRepr
     if elems.size == 1 then

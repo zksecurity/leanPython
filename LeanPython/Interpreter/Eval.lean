@@ -1,4 +1,5 @@
 import LeanPython.Runtime.Builtins
+import LeanPython.Parser.Core
 import Std.Data.HashMap
 import Std.Data.HashSet
 
@@ -11,6 +12,7 @@ open LeanPython.Runtime
 open LeanPython.Runtime.Ops
 open LeanPython.Runtime.Builtins
 open LeanPython.Interpreter
+open LeanPython.Parser (parse)
 open LeanPython.Lexer (SourceSpan SourcePos)
 
 -- ============================================================
@@ -220,6 +222,61 @@ private def valueToConstant : Value → Constant
 -- ============================================================
 -- Mutual block: evalExpr, execStmt, and helpers
 -- ============================================================
+
+-- ============================================================
+-- Module system helpers (outside mutual block)
+-- ============================================================
+
+/-- Check if a file exists on the filesystem. -/
+private def fileExists (path : System.FilePath) : IO Bool := do
+  try
+    let _ ← IO.FS.readFile path
+    return true
+  catch _ =>
+    return false
+
+/-- Resolve a dotted module name to a file path.
+    Returns (absolutePath, isPackage) or none if not found. -/
+private def resolveModulePath (moduleName : String) (searchPaths : Array String)
+    : IO (Option (String × Bool)) := do
+  let parts := moduleName.splitOn "."
+  for base in searchPaths do
+    let basePath := System.FilePath.mk base
+    -- Build the path from parts
+    let mut dirPath := basePath
+    for p in parts do
+      dirPath := dirPath / p
+    -- Try as package: dir/__init__.py
+    let initPath := dirPath / "__init__.py"
+    if ← fileExists initPath then
+      return some (initPath.toString, true)
+    -- Try as module: dir.py (go up one level and add .py)
+    let parentPath := dirPath.parent.getD basePath
+    let lastPart := parts.getLast!
+    let modPath := parentPath / (lastPart ++ ".py")
+    if ← fileExists modPath then
+      return some (modPath.toString, false)
+  return none
+
+/-- Resolve a relative import to an absolute module name. -/
+private def resolveRelativeImport (currentPackage : Option String) (level : Nat)
+    (moduleName : Option String) : Except String String :=
+  match currentPackage with
+  | none => .error "attempted relative import with no known parent package"
+  | some pkg =>
+    let parts := pkg.splitOn "."
+    -- level 1 = current package, level 2 = parent, etc.
+    let goUp := level - 1
+    if goUp > parts.length then
+      .error "attempted relative import beyond top-level package"
+    else
+      let baseParts := parts.take (parts.length - goUp)
+      let base := ".".intercalate baseParts
+      match moduleName with
+      | none => if base.isEmpty then .error "empty module name" else .ok base
+      | some mn =>
+        if base.isEmpty then .ok mn
+        else .ok (base ++ "." ++ mn)
 
 mutual
 
@@ -880,6 +937,20 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     if attr == "__next__" || attr == "__iter__" || attr == "close" then
       return .boundMethod obj attr
     else throwAttributeError s!"'generator' object has no attribute '{attr}'"
+  | .module mref => do
+    let md ← heapGetModuleData mref
+    if attr == "__name__" then return .str md.name
+    if attr == "__file__" then
+      match md.file with
+      | some f => return .str f
+      | none => return .none
+    if attr == "__package__" then
+      match md.package with
+      | some p => return .str p
+      | none => return .none
+    match md.ns[attr]? with
+    | some v => return v
+    | none => throwAttributeError s!"module '{md.name}' has no attribute '{attr}'"
   | .classObj cref => do
     let cd ← heapGetClassData cref
     -- Special attributes on class objects
@@ -1070,6 +1141,9 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
   | .attribute obj attr _ => do
     let objVal ← evalExpr obj
     match objVal with
+    | .module mref => do
+      let md ← heapGetModuleData mref
+      heapSetModuleData mref { md with ns := md.ns.insert attr value }
     | .dict ref => do
       let pairs ← heapGetDict ref
       let key := Value.str attr
@@ -1175,6 +1249,204 @@ partial def assignSubscriptValue (obj idx value : Value) : InterpM Unit := do
     | some _ => return ()
     | none => throwTypeError s!"'{typeName obj}' does not support item assignment"
   | _ => throwTypeError s!"'{typeName obj}' does not support item assignment"
+
+-- ============================================================
+-- Module system (inside mutual block since loadModule calls execStmts)
+-- ============================================================
+
+/-- Create a synthetic built-in module. Returns none if not a known builtin. -/
+partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
+  let st ← get
+  -- Check cache first
+  if let some v := st.loadedModules[name]? then return some v
+  let mkMod (ns : Std.HashMap String Value) : InterpM Value := do
+    let md : ModuleData := {
+      name := name, file := none, package := none, ns := ns, allNames := none }
+    let modVal ← allocModule md
+    modify fun st' => { st' with loadedModules := st'.loadedModules.insert name modVal }
+    return modVal
+  match name with
+  | "__future__" =>
+    let ns : Std.HashMap String Value := {}
+    some <$> mkMod (ns.insert "annotations" .none)
+  | "typing" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "TYPE_CHECKING" (.bool false)
+    -- Stub common typing names as none so imports don't fail
+    for n in ["Any", "Optional", "List", "Dict", "Set", "Tuple", "FrozenSet",
+              "ClassVar", "Final", "Self", "Union", "Callable", "Protocol",
+              "runtime_checkable", "NamedTuple", "get_type_hints",
+              "override", "NoReturn", "SupportsInt", "SupportsIndex",
+              "TypeAlias", "Literal", "IO", "Sequence", "Mapping",
+              "Iterator", "Iterable", "Generator", "Coroutine",
+              "Awaitable", "AsyncIterator", "AsyncGenerator",
+              "Type", "Generic", "TypeVar", "Annotated",
+              "overload", "cast", "no_type_check"] do
+      ns := ns.insert n .none
+    some <$> mkMod ns
+  | "typing_extensions" =>
+    -- Alias for typing for compatibility
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "TYPE_CHECKING" (.bool false)
+    for n in ["override", "Self", "Protocol", "runtime_checkable",
+              "Annotated", "TypeAlias", "get_type_hints"] do
+      ns := ns.insert n .none
+    some <$> mkMod ns
+  | "abc" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "ABC" .none
+    ns := ns.insert "abstractmethod" .none
+    ns := ns.insert "ABCMeta" .none
+    some <$> mkMod ns
+  | "dataclasses" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "dataclass" (.builtin "dataclass")
+    ns := ns.insert "field" .none
+    ns := ns.insert "fields" .none
+    some <$> mkMod ns
+  | "functools" =>
+    let mut ns : Std.HashMap String Value := {}
+    for n in ["singledispatch", "lru_cache", "reduce", "wraps",
+              "partial", "cached_property", "total_ordering"] do
+      ns := ns.insert n .none
+    some <$> mkMod ns
+  | "enum" =>
+    let mut ns : Std.HashMap String Value := {}
+    ns := ns.insert "Enum" .none
+    ns := ns.insert "IntEnum" .none
+    ns := ns.insert "auto" .none
+    some <$> mkMod ns
+  | _ => return none
+
+/-- Load a module by fully-qualified name and file path.
+    Handles caching, circular import detection, and state isolation. -/
+partial def loadModule (fqName : String) (filePath : String) (isPackage : Bool)
+    : InterpM Value := do
+  let st ← get
+  -- 1. Check cache
+  if let some v := st.loadedModules[fqName]? then return v
+  -- 2. Circular import detection: return partial module
+  if st.loadingModules.contains fqName then
+    -- Allocate a partial (empty) module and cache it
+    let md : ModuleData := {
+      name := fqName, file := some filePath, package := none
+      ns := {}, allNames := none }
+    let modVal ← allocModule md
+    modify fun s => { s with loadedModules := s.loadedModules.insert fqName modVal }
+    return modVal
+  -- 3. Mark as loading
+  modify fun s => { s with loadingModules := s.loadingModules.insert fqName }
+  -- 4. Load parent packages first
+  let parts := fqName.splitOn "."
+  if parts.length > 1 then
+    for i in [1:parts.length] do
+      let parentName := ".".intercalate (parts.take i)
+      let st' ← get
+      if st'.loadedModules[parentName]?.isNone then
+        -- Try to load parent as package
+        let parentResolved ← (resolveModulePath parentName st'.searchPaths : IO _)
+        match parentResolved with
+        | some (parentPath, parentIsPkg) =>
+          let _ ← loadModule parentName parentPath parentIsPkg
+        | none => pure ()  -- Parent might be implicit namespace package
+  -- 5. Read and parse source
+  let source ← (IO.FS.readFile filePath : IO String)
+  let stmts ← match parse source with
+    | .ok (.module ss) => pure ss
+    | .error e => throwImportError s!"syntax error in {filePath}: {e}"
+  -- 6. Save current context
+  let saved ← get
+  let savedGlobal := saved.globalScope
+  let savedLocals := saved.localScopes
+  let savedGlobalDecls := saved.globalDecls
+  let savedNonlocalDecls := saved.nonlocalDecls
+  let savedFile := saved.currentFile
+  let savedPackage := saved.currentPackage
+  -- 7. Set up fresh scope for module execution
+  let pkg : Option String :=
+    if isPackage then some fqName
+    else if parts.length > 1 then some (".".intercalate (parts.take (parts.length - 1)))
+    else none
+  let mut moduleScope : Scope := {}
+  moduleScope := moduleScope.insert "__name__" (.str fqName)
+  moduleScope := moduleScope.insert "__file__" (.str filePath)
+  match pkg with
+  | some p => moduleScope := moduleScope.insert "__package__" (.str p)
+  | none => pure ()
+  set { saved with
+    globalScope := moduleScope
+    localScopes := []
+    globalDecls := []
+    nonlocalDecls := []
+    currentFile := some filePath
+    currentPackage := pkg }
+  -- 8. Execute module body
+  try
+    execStmts stmts
+  catch
+    | .error e => do
+      -- Restore context before propagating
+      modify fun s => { s with
+        globalScope := savedGlobal
+        localScopes := savedLocals
+        globalDecls := savedGlobalDecls
+        nonlocalDecls := savedNonlocalDecls
+        currentFile := savedFile
+        currentPackage := savedPackage }
+      throwRuntimeError e
+    | other => do
+      modify fun s => { s with
+        globalScope := savedGlobal
+        localScopes := savedLocals
+        globalDecls := savedGlobalDecls
+        nonlocalDecls := savedNonlocalDecls
+        currentFile := savedFile
+        currentPackage := savedPackage }
+      throw other
+  -- 9. Capture namespace
+  let finalSt ← get
+  let moduleNs := finalSt.globalScope
+  -- 10. Extract __all__ if defined
+  let allNames : Option (Array String) :=
+    match moduleNs["__all__"]? with
+    | some (.list _) => none  -- TODO: extract list elements
+    | _ => none
+  -- 11. Build module and cache
+  let md : ModuleData := {
+    name := fqName, file := some filePath, package := pkg
+    ns := moduleNs, allNames := allNames }
+  let modVal ← allocModule md
+  modify fun s => { s with
+    loadedModules := s.loadedModules.insert fqName modVal
+    loadingModules := s.loadingModules.erase fqName }
+  -- 12. Set as attribute on parent module if applicable
+  if parts.length > 1 then
+    let parentName := ".".intercalate (parts.take (parts.length - 1))
+    let childName := parts.getLast!
+    let st' ← get
+    if let some (.module pref) := st'.loadedModules[parentName]? then
+      let pmd ← heapGetModuleData pref
+      heapSetModuleData pref { pmd with ns := pmd.ns.insert childName modVal }
+  -- 13. Restore interpreter context
+  modify fun s => { s with
+    globalScope := savedGlobal
+    localScopes := savedLocals
+    globalDecls := savedGlobalDecls
+    nonlocalDecls := savedNonlocalDecls
+    currentFile := savedFile
+    currentPackage := savedPackage }
+  return modVal
+
+/-- Resolve and load a module by name (builtin or file-based). -/
+partial def resolveAndLoadModule (fqName : String) : InterpM Value := do
+  -- Try builtin modules first
+  if let some v ← getBuiltinModule fqName then return v
+  -- Try file system
+  let st ← get
+  let resolved ← (resolveModulePath fqName st.searchPaths : IO _)
+  match resolved with
+  | some (path, isPkg) => loadModule fqName path isPkg
+  | none => throwModuleNotFoundError fqName
 
 -- ============================================================
 -- Statement execution
@@ -1546,8 +1818,70 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     match bodyError with
     | some sig => if !suppressed then throw sig
     | none => pure ()
-  | .import_ _aliases _ => throwNotImplemented "import statements"
-  | .importFrom _ _aliases _ _ => throwNotImplemented "import-from statements"
+  | .import_ aliases _ => do
+    for alias in aliases do
+      let fqName := alias.name
+      let modVal ← resolveAndLoadModule fqName
+      match alias.asName with
+      | some asName => setVariable asName modVal
+      | none =>
+        -- "import foo.bar.baz" binds "foo" in the local scope
+        let topName := (fqName.splitOn ".").head!
+        if topName != fqName then
+          -- Load and bind the top-level module
+          let topMod ← resolveAndLoadModule topName
+          setVariable topName topMod
+        else
+          setVariable topName modVal
+
+  | .importFrom modNameOpt aliases levelOpt _ => do
+    -- Handle `from __future__ import annotations` as no-op
+    if modNameOpt == some "__future__" && levelOpt.isNone then
+      return
+    -- Resolve the full module name
+    let fqName ← match levelOpt with
+      | some level => do
+        let st ← get
+        match resolveRelativeImport st.currentPackage level modNameOpt with
+        | .ok name => pure name
+        | .error msg => throwImportError msg
+      | none =>
+        match modNameOpt with
+        | some name => pure name
+        | none => throwImportError "no module name in import"
+    -- Load the module
+    let modVal ← resolveAndLoadModule fqName
+    let modRef ← match modVal with
+      | .module ref => pure ref
+      | _ => throwImportError s!"expected module object for '{fqName}'"
+    let md ← heapGetModuleData modRef
+    -- Import names from module namespace
+    for alias in aliases do
+      if alias.name == "*" then
+        -- from module import *
+        let names := match md.allNames with
+          | some all => all.toList
+          | none => md.ns.toList.map fun (p : String × Value) => p.1
+        for name in names do
+          if !name.startsWith "_" || md.allNames.isSome then
+            match md.ns[name]? with
+            | some v => setVariable name v
+            | none => pure ()
+      else
+        -- from module import name [as alias]
+        match md.ns[alias.name]? with
+        | some v =>
+          let bindName := alias.asName.getD alias.name
+          setVariable bindName v
+        | none => do
+          -- The name might be a subpackage/submodule
+          let subFqName := fqName ++ "." ++ alias.name
+          try
+            let subMod ← resolveAndLoadModule subFqName
+            let bindName := alias.asName.getD alias.name
+            setVariable bindName subMod
+          catch _ =>
+            throwImportError s!"cannot import name '{alias.name}' from '{fqName}'"
 
   | .asyncFor target iter body orelse _ => do
     let items ← iterValues (← evalExpr iter)

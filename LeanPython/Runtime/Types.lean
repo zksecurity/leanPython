@@ -44,6 +44,7 @@ inductive Value where
   | staticMethod : Value → Value
   | classMethod  : Value → Value
   | property     : Value → Option Value → Option Value → Value
+  | module       : HeapRef → Value
 
 instance : Inhabited Value where
   default := .none
@@ -89,6 +90,14 @@ structure InstanceData where
   cls   : Value
   attrs : Std.HashMap String Value
 
+/-- Runtime module data stored on the heap. -/
+structure ModuleData where
+  name     : String                    -- __name__
+  file     : Option String             -- __file__
+  package  : Option String             -- __package__
+  ns       : Std.HashMap String Value  -- module namespace
+  allNames : Option (Array String)     -- __all__ if defined
+
 -- ============================================================
 -- Heap objects
 -- ============================================================
@@ -102,6 +111,7 @@ inductive HeapObject where
   | generatorObj : Array Value → Nat → HeapObject
   | classObjData : ClassData → HeapObject
   | instanceObjData : InstanceData → HeapObject
+  | moduleObj : ModuleData → HeapObject
 
 -- ============================================================
 -- Runtime errors
@@ -121,6 +131,8 @@ inductive RuntimeError where
   | stopIteration   : RuntimeError
   | notImplemented  : String → RuntimeError
   | runtimeError    : String → RuntimeError
+  | importError     : String → RuntimeError
+  | moduleNotFound  : String → RuntimeError
   deriving Repr
 
 instance : ToString RuntimeError where
@@ -137,6 +149,8 @@ instance : ToString RuntimeError where
     | .stopIteration     => "StopIteration"
     | .notImplemented s  => s!"NotImplementedError: {s}"
     | .runtimeError s    => s!"RuntimeError: {s}"
+    | .importError s     => s!"ImportError: {s}"
+    | .moduleNotFound s  => s!"ModuleNotFoundError: No module named '{s}'"
 
 -- ============================================================
 -- BEq Value (needed for dict lookup, == operator, in operator)
@@ -179,6 +193,9 @@ partial def Value.beq : Value → Value → Bool
   | _, .classMethod _ => false
   | .property _ _ _, _ => false
   | _, .property _ _ _ => false
+  | .module a, .module b => a == b
+  | .module _, _ => false
+  | _, .module _ => false
   -- Cross-type: bool/int interop (Python: True == 1, False == 0)
   | .bool a, .int b => (if a then 1 else 0) == b
   | .int a, .bool b => a == (if b then 1 else 0)
@@ -228,6 +245,7 @@ partial def Value.toStr : Value → String
   | .staticMethod _ => "<staticmethod object>"
   | .classMethod _ => "<classmethod object>"
   | .property _ _ _ => "<property object>"
+  | .module _ => "<module>"
 
 /-- Convert a Value to its Python `repr()` representation. -/
 partial def Value.toRepr : Value → String
@@ -258,6 +276,7 @@ partial def Value.toRepr : Value → String
   | .staticMethod _ => "<staticmethod object>"
   | .classMethod _ => "<classmethod object>"
   | .property _ _ _ => "<property object>"
+  | .module _ => "<module>"
 
 instance : ToString Value where
   toString := Value.toStr
@@ -280,13 +299,15 @@ def runtimeErrorTypeName : RuntimeError → String
   | .stopIteration    => "StopIteration"
   | .notImplemented _ => "NotImplementedError"
   | .runtimeError _   => "RuntimeError"
+  | .importError _    => "ImportError"
+  | .moduleNotFound _ => "ModuleNotFoundError"
 
 /-- Get the message portion of a RuntimeError. -/
 def runtimeErrorMessage : RuntimeError → String
   | .nameError s | .typeError s | .valueError s | .indexError s
   | .keyError s | .zeroDivision s | .assertionError s
   | .attributeError s | .overflowError s | .notImplemented s
-  | .runtimeError s => s
+  | .runtimeError s | .importError s | .moduleNotFound s => s
   | .stopIteration => ""
 
 /-- Check if an exception type matches a handler type, respecting the hierarchy.
@@ -322,7 +343,8 @@ def builtinNames : List String :=
    "RuntimeError", "ZeroDivisionError", "AssertionError",
    "AttributeError", "OverflowError", "StopIteration",
    "NotImplementedError", "Exception", "BaseException",
-   "NameError", "OSError", "IOError", "FileNotFoundError"]
+   "NameError", "OSError", "IOError", "FileNotFoundError",
+   "ImportError", "ModuleNotFoundError"]
 
 /-- Check if a name is a built-in function. -/
 def isBuiltinName (name : String) : Bool :=

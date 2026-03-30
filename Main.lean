@@ -4,7 +4,7 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | [path] =>
     let source ← IO.FS.readFile path
-    match ← LeanPython.Interpreter.interpret source with
+    match ← LeanPython.Interpreter.interpret source (some path) with
     | .ok _ => return 0
     | .error msg =>
       IO.eprintln msg

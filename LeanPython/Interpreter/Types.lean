@@ -46,6 +46,11 @@ structure InterpreterState where
   output          : List String
   activeException : Option RuntimeError
   yieldAccumulator : Option (Array Value)
+  loadedModules  : Std.HashMap String Value
+  loadingModules : Std.HashSet String
+  searchPaths    : Array String
+  currentFile    : Option String
+  currentPackage : Option String
   deriving Inhabited
 
 /-- Create a fresh interpreter state. -/
@@ -58,7 +63,12 @@ def InterpreterState.initial : InterpreterState :=
     nextRef         := 0
     output          := []
     activeException := none
-    yieldAccumulator := none }
+    yieldAccumulator := none
+    loadedModules  := {}
+    loadingModules := {}
+    searchPaths    := #[]
+    currentFile    := none
+    currentPackage := none }
 
 -- ============================================================
 -- Interpreter monad
@@ -330,6 +340,7 @@ def typeName : Value → String
   | .staticMethod _ => "staticmethod"
   | .classMethod _ => "classmethod"
   | .property _ _ _ => "property"
+  | .module _ => "module"
 
 -- ============================================================
 -- Class heap operations
@@ -385,5 +396,34 @@ def heapSetGeneratorIdx (ref : HeapRef) (newIdx : Nat) : InterpM Unit := do
 def allocGenerator (values : Array Value) : InterpM Value := do
   let ref ← heapAlloc (.generatorObj values 0)
   return .generator ref
+
+-- ============================================================
+-- Module heap operations
+-- ============================================================
+
+/-- Get module data from the heap. -/
+def heapGetModuleData (ref : HeapRef) : InterpM ModuleData := do
+  match ← heapGet ref with
+  | .moduleObj md => return md
+  | _ => throwRuntimeError (.runtimeError "heap object is not a module")
+
+/-- Update module data on the heap. -/
+def heapSetModuleData (ref : HeapRef) (md : ModuleData) : InterpM Unit :=
+  heapSet ref (.moduleObj md)
+
+/-- Allocate a module on the heap. -/
+def allocModule (md : ModuleData) : InterpM Value := do
+  let ref ← heapAlloc (.moduleObj md)
+  return .module ref
+
+-- ============================================================
+-- Import error helpers
+-- ============================================================
+
+def throwImportError {α : Type} (msg : String) : InterpM α :=
+  throwRuntimeError (.importError msg)
+
+def throwModuleNotFoundError {α : Type} (name : String) : InterpM α :=
+  throwRuntimeError (.moduleNotFound name)
 
 end LeanPython.Interpreter
