@@ -759,6 +759,20 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     match name with
     | "map" => builtinMap args
     | "filter" => builtinFilter args
+    | "bytes" => do
+      -- Try __bytes__ dunder on instance arguments before falling back to callBuiltin
+      match args with
+      | [.instance iref] => do
+        let id_ ← heapGetInstanceData iref
+        match id_.wrappedValue with
+        | some (.bytes _) => callBuiltin name args kwargs  -- already handled
+        | some (.int _) => callBuiltin name args kwargs    -- bytes(n) pattern
+        | _ =>
+          match ← callDunder (.instance iref) "__bytes__" [] with
+          | some (.bytes b) => return .bytes b
+          | some _ => throwTypeError "__bytes__ returned non-bytes type"
+          | none => callBuiltin name args kwargs
+      | _ => callBuiltin name args kwargs
     | "min" => do
       let keyKw := kwargs.find? (fun (k, _) => k == "key")
       match keyKw with
@@ -2836,7 +2850,32 @@ partial def assignSubscriptValue (obj idx value : Value) : InterpM Unit := do
       let ni := normalizeIndex i arr.size
       if ni < 0 || ni >= arr.size then throwIndexError "list assignment index out of range"
       heapSetList ref (arr.set! ni.toNat value)
-    | _ => throwTypeError "list indices must be integers"
+    | .tuple #[startV, stopV, stepV] => do
+      -- Slice assignment: list[start:stop:step] = iterable
+      let arr ← heapGetList ref
+      let len := arr.size
+      let toOpt : Value → Option Value
+        | .none => none
+        | v => some v
+      let (start, stop, step) ← computeSliceIndices len (toOpt startV) (toOpt stopV) (toOpt stepV)
+      let newItems ← iterValuesExt value
+      if step == 1 then
+        -- Contiguous slice: can change length
+        let startN := start.toNat
+        let stopN := stop.toNat
+        let before := (arr.toList.take startN).toArray
+        let after := (arr.toList.drop stopN).toArray
+        heapSetList ref (before ++ newItems ++ after)
+      else
+        -- Extended slice: must match length
+        let indices := sliceIndices start stop step
+        if newItems.size != indices.length then
+          throwValueError s!"attempt to assign sequence of size {newItems.size} to extended slice of size {indices.length}"
+        let mut result := arr
+        for i in [:indices.length] do
+          result := result.set! indices[i]! newItems[i]!
+        heapSetList ref result
+    | _ => throwTypeError "list indices must be integers or slices"
   | .dict ref => do
     let pairs ← heapGetDict ref
     let mut newPairs := pairs
@@ -2966,6 +3005,7 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "isnan" (.builtin "math.isnan")
     ns := ns.insert "isinf" (.builtin "math.isinf")
     ns := ns.insert "isqrt" (.builtin "math.isqrt")
+    ns := ns.insert "comb"  (.builtin "math.comb")
     ns := ns.insert "inf"   (.float (1.0 / 0.0))
     ns := ns.insert "nan"   (.float (0.0 / 0.0))
     ns := ns.insert "pi"    (.float 3.141592653589793)
@@ -3117,6 +3157,7 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "getcwd"  (.builtin "os.getcwd")
     ns := ns.insert "getenv"  (.builtin "os.getenv")
     ns := ns.insert "listdir" (.builtin "os.listdir")
+    ns := ns.insert "urandom" (.builtin "os.urandom")
     ns := ns.insert "sep"     (.str "/")
     ns := ns.insert "linesep" (.str "\n")
     ns := ns.insert "name"    (.str "posix")

@@ -3,3 +3,4 @@ import LeanPythonTest.Parser
 import LeanPythonTest.Interpreter
 import LeanPythonTest.Module
 import LeanPythonTest.Stdlib
+import LeanPythonTest.Crypto

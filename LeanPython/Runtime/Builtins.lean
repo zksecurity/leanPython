@@ -844,6 +844,7 @@ partial def callBuiltin (name : String) (args : List Value)
   | "math.floor" => mathFloor args
   | "math.sqrt"  => mathSqrt args
   | "math.isqrt" => mathIsqrt args
+  | "math.comb"  => mathComb args
   | "math.log"   => mathLog args
   | "math.log2"  => mathLog2 args
   | "math.fabs"  => mathFabs args
@@ -1064,9 +1065,10 @@ partial def callBuiltin (name : String) (args : List Value)
   -- ============================================================
   -- os module functions
   -- ============================================================
-  | "os.getcwd" => osGetcwd args
-  | "os.getenv" => osGetenv args
+  | "os.getcwd"  => osGetcwd args
+  | "os.getenv"  => osGetenv args
   | "os.listdir" => osListdir args
+  | "os.urandom" => osUrandom args
   -- ============================================================
   -- os.path module functions
   -- ============================================================

@@ -784,8 +784,8 @@ For non-deterministic tests, structural equivalence is checked.
 | 9b | leanSpec: SSZ merkleization | Done (functools.singledispatch with .register, bytes slicing, hash_nodes/pack_bytes/merkleize/mix_in_length pipeline, pack_bits, hash_tree_root for BaseUint/Boolean/BaseBytes/BaseByteList/BaseBitvector/BaseBitlist/SSZVector/SSZList/Container via singledispatch, issubclass with tuple, bytes.join) |
 | 9c | leanSpec: consensus containers | Done (Slot/ValidatorIndex Uint64 subclasses with methods, math.isqrt, Checkpoint nested Container, Config/BlockHeader containers, model_copy on nested containers, default field values, SSZList with Container elements composite hash_tree_root, BlockBody/Block nested Container+SSZList, State.generate_genesis classmethod factory, hash_tree_root verified byte-for-byte, process_slots/process_block_header/process_block pipeline, full process_attestations with dict comprehension+enumerate, vote tracking, supermajority justification, finalization advance, sorted Bytes32 keys, del dict keys, AggregatedAttestation/AttestationData/AggregationBits containers) |
 | 9d | leanSpec: state transition | Done (state_transition end-to-end with two-pass block building, state root validation, negative test for wrong state root) |
-| 9e | leanSpec: fork choice | Not started |
-| 9f | leanSpec: cryptographic subspecs | Not started |
+| 9e | leanSpec: fork choice | Done (Store with block/state management, BlockLookup ancestors generator, LMD GHOST fork choice algorithm, compute_block_weights, update_head) |
+| 9f | leanSpec: cryptographic subspecs | Done (KoalaBear Fp field arithmetic with modular inverse/division, Poseidon2 width-16/24 permutation with reference test vectors, compression and sponge modes, int_to_base_p, SHAKE128-based PRF, tweak encoding, hash chain traversal with composition verification, hypercube layer size via math.comb + map_to_vertex round-trip, Merkle tree construction and path verification; interpreter: math.comb, os.urandom, list slice assignment, __bytes__ dunder) |
 | 10 | Async runtime (optional) | Not started |
 
 ---

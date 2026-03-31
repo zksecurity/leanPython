@@ -43,6 +43,19 @@ private def pathIsDir (path : System.FilePath) : IO Bool := do
 -- os module functions
 -- ============================================================
 
+/-- Python os.urandom(n): return n random bytes. -/
+partial def osUrandom (args : List Value) : InterpM Value := do
+  match args with
+  | [.int n] =>
+    if n < 0 then throwValueError "negative argument not allowed"
+    else do
+      let mut ba := ByteArray.empty
+      for _ in [:n.toNat] do
+        let b ← (IO.rand 0 255 : IO Nat)
+        ba := ba.push b.toUInt8
+      return .bytes ba
+  | _ => throwTypeError "urandom() takes exactly 1 argument"
+
 /-- Python os.getcwd(): return current working directory. -/
 partial def osGetcwd (args : List Value) : InterpM Value := do
   match args with

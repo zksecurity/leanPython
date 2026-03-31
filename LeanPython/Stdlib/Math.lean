@@ -114,4 +114,25 @@ partial def mathIsqrt (args : List Value) : InterpM Value := do
   | [.bool b] => return .int (if b then 1 else 0)
   | _ => throwTypeError "math.isqrt() requires an integer argument"
 
+/-- Compute binomial coefficient C(n, k) = n! / (k! * (n-k)!) -/
+private def natComb (n k : Nat) : Nat :=
+  if k > n then 0
+  else
+    -- Use the multiplicative formula: C(n,k) = n*(n-1)*...*(n-k+1) / k!
+    -- Use the smaller of k and n-k for efficiency
+    let k' := min k (n - k)
+    let rec loop (i : Nat) (num denom : Nat) : Nat :=
+      if i >= k' then num / denom
+      else loop (i + 1) (num * (n - i)) (denom * (i + 1))
+    loop 0 1 1
+
+/-- Python math.comb(n, k): return number of ways to choose k items from n -/
+partial def mathComb (args : List Value) : InterpM Value := do
+  match args with
+  | [.int n, .int k] =>
+    if n < 0 then throwValueError "n must be a non-negative integer"
+    else if k < 0 then throwValueError "k must be a non-negative integer"
+    else return .int (Int.ofNat (natComb n.toNat k.toNat))
+  | _ => throwTypeError "comb expected 2 arguments"
+
 end LeanPython.Stdlib.Math
