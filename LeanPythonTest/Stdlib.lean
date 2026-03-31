@@ -784,3 +784,45 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- Multiple Uint subclasses
 #eval assertPy "class BaseUint(int):\n    BITS = 0\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    BITS = 8\nclass Uint16(BaseUint):\n    BITS = 16\nclass Uint32(BaseUint):\n    BITS = 32\nclass Uint64(BaseUint):\n    BITS = 64\nprint(int(Uint8(255)))\nprint(int(Uint16(1000)))\nprint(int(Uint32(100000)))\nprint(int(Uint64(2**40)))" "255\n1000\n100000\n1099511627776\n"
+
+-- Instance method calls with kwargs
+#eval assertPy "class Foo:\n    def greet(self, name='world', greeting='hello'):\n        return greeting + ' ' + name\nf = Foo()\nprint(f.greet(greeting='hi', name='alice'))" "hi alice\n"
+
+-- kwargs forwarded through super()
+#eval assertPy "class Base:\n    def method(self, x=1, y=2):\n        return x + y\nclass Child(Base):\n    def method(self, x=1, y=2):\n        return super().method(x=x, y=y) * 10\nc = Child()\nprint(c.method(x=3, y=4))" "70\n"
+
+-- bytes * int multiplication
+#eval assertPy "b = b'\\x00' * 32\nprint(len(b))\nprint(b[0])\nb2 = b'\\xab' * 4\nprint(len(b2))\nprint(b2[0])" "32\n0\n4\n171\n"
+
+-- bytes(instance) with wrappedValue
+#eval assertPy "class BaseBytes(bytes):\n    def __new__(cls, value=b''):\n        return super().__new__(cls, value)\nclass Bytes4(BaseBytes):\n    pass\nx = Bytes4(b'\\x01\\x02\\x03\\x04')\nraw = bytes(x)\nprint(len(raw))\nprint(raw[0])\nprint(raw[3])" "4\n1\n4\n"
+
+-- bytes(self).hex() conversion chain
+#eval assertPy "class BaseBytes(bytes):\n    def __new__(cls, value=b''):\n        return super().__new__(cls, value)\nclass Bytes4(BaseBytes):\n    pass\nx = Bytes4(b'\\xde\\xad\\xbe\\xef')\nprint(bytes(x).hex())" "deadbeef\n"
+
+-- pow(base, exp, None) = pow(base, exp)
+#eval assertPy "print(pow(2, 10, None))\nprint(pow(3, 4, None))" "1024\n81\n"
+
+-- Instance method calling another instance method
+#eval assertPy "class BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def _raise_type_error(self, other, op):\n        raise TypeError('bad: ' + op)\n    def __add__(self, other):\n        if not isinstance(other, BaseUint):\n            self._raise_type_error(other, '+')\n        return type(self)(int(self) + int(other))\nclass Uint64(BaseUint):\n    BITS = 64\ntry:\n    Uint64(1) + 'hello'\nexcept TypeError as e:\n    print(str(e))" "bad: +\n"
+
+-- Classmethod calling cls() constructor with int.from_bytes
+#eval assertPy "class BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    def get_byte_length(cls):\n        return cls.BITS // 8\n    @classmethod\n    def decode_bytes(cls, data):\n        return cls(int.from_bytes(data, 'little'))\nclass Uint64(BaseUint):\n    BITS = 64\nresult = Uint64.decode_bytes(b'\\x00\\x01\\x00\\x00\\x00\\x00\\x00\\x00')\nprint(int(result))\nprint(type(result).__name__)" "256\nUint64\n"
+
+-- to_bytes with keyword args on int subclass instance
+#eval assertPy "class BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    def get_byte_length(cls):\n        return cls.BITS // 8\n    def encode_bytes(self):\n        return int(self).to_bytes(length=self.get_byte_length(), byteorder='little')\nclass Uint64(BaseUint):\n    BITS = 64\nx = Uint64(256)\nb = x.encode_bytes()\nprint(len(b))\nprint(b[0])\nprint(b[1])" "8\n0\n1\n"
+
+-- Full BaseUint encode/decode round-trip via io.BytesIO
+#eval assertPy "import io\nclass BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    def get_byte_length(cls):\n        return cls.BITS // 8\n    def encode_bytes(self):\n        return int(self).to_bytes(self.get_byte_length(), 'little')\n    @classmethod\n    def decode_bytes(cls, data):\n        return cls(int.from_bytes(data, 'little'))\n    def serialize(self, stream):\n        data = self.encode_bytes()\n        stream.write(data)\n        return len(data)\nclass Uint64(BaseUint):\n    BITS = 64\nx = Uint64(12345678)\nstream = io.BytesIO()\nx.serialize(stream)\nraw = stream.getvalue()\nprint(len(raw))\ny = Uint64.decode_bytes(raw)\nprint(int(y))\nprint(type(y).__name__)" "8\n12345678\nUint64\n"
+
+-- BaseBytes subclass with length validation and coercion
+#eval assertPy "class SSZValueError(Exception):\n    pass\nclass BaseBytes(bytes):\n    LENGTH = 0\n    def __new__(cls, value=b''):\n        if isinstance(value, (bytes, bytearray)):\n            b = bytes(value)\n        elif isinstance(value, str):\n            b = bytes.fromhex(value)\n        else:\n            raise TypeError('Cannot coerce')\n        if len(b) != cls.LENGTH:\n            raise SSZValueError('wrong length')\n        return super().__new__(cls, b)\n    @classmethod\n    def zero(cls):\n        return cls(b'\\x00' * cls.LENGTH)\nclass Bytes4(BaseBytes):\n    LENGTH = 4\nclass Bytes32(BaseBytes):\n    LENGTH = 32\nx = Bytes4(b'\\x01\\x02\\x03\\x04')\nprint(len(x))\nz = Bytes32.zero()\nprint(len(z))\nprint(z[0])" "4\n32\n0\n"
+
+-- BaseBytes hex() via bytes(self).hex()
+#eval assertPy "class BaseBytes(bytes):\n    LENGTH = 4\n    def __new__(cls, value=b''):\n        return super().__new__(cls, value)\n    def hex(self):\n        return bytes(self).hex()\n    def __repr__(self):\n        return type(self).__name__ + '(' + self.hex() + ')'\nclass Bytes4(BaseBytes):\n    LENGTH = 4\nx = Bytes4(b'\\xde\\xad\\xbe\\xef')\nprint(x.hex())\nprint(repr(x))" "deadbeef\nBytes4(deadbeef)\n"
+
+-- hash() with tuple containing type(self)
+#eval assertPy "class BaseUint(int):\n    BITS = 8\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __hash__(self):\n        return hash((type(self).__name__, int(self)))\nclass Uint8(BaseUint):\n    BITS = 8\na = Uint8(42)\nb = Uint8(42)\nprint(hash(a) == hash(b))" "True\n"
+
+-- @classmethod + @override stacking (leanSpec pattern)
+#eval assertPy "from abc import ABC, abstractmethod\nfrom typing import override\nclass SSZType(ABC):\n    @classmethod\n    @abstractmethod\n    def is_fixed_size(cls):\n        pass\n    @classmethod\n    @abstractmethod\n    def get_byte_length(cls):\n        pass\nclass BaseUint(int, SSZType):\n    __slots__ = ()\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    @override\n    def is_fixed_size(cls):\n        return True\n    @classmethod\n    @override\n    def get_byte_length(cls):\n        return cls.BITS // 8\nclass Uint64(BaseUint):\n    BITS = 64\nprint(Uint64.is_fixed_size())\nprint(Uint64.get_byte_length())" "True\n8\n"

@@ -1401,18 +1401,32 @@ partial def callValueDispatch (callee : Value) (args : List Value)
           | _ => throwTypeError s!"int.__new__: cannot convert {typeName val} to int"
         | other => throwTypeError s!"int.__new__: cannot convert {typeName other} to int"
       else if name == "bytes.__new__" then do
-        match args with
-        | [cls@(.classObj _), .bytes b] =>
+        -- bytes.__new__(cls, value) — may be called via super().__new__(cls, value)
+        -- which prepends inst, giving [inst, cls, value]. Extract last class and value.
+        let (cls, mval) ← match args with
+          | [cls@(.classObj _), v] => pure (cls, some v)
+          | [_, cls@(.classObj _), v] => pure (cls, some v)  -- super() prepends inst
+          | [cls@(.classObj _)] => pure (cls, none)
+          | [_, cls@(.classObj _)] => pure (cls, none)  -- super() prepends inst, no value
+          | _ => throwTypeError "bytes.__new__(cls, value) requires a class and bytes"
+        match mval with
+        | some (.bytes b) =>
           allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes b) }
-        | [cls@(.classObj _), .int n] => do
+        | some (.int n) => do
           -- bytes(n) creates n zero bytes
           let mut buf := ByteArray.empty
           for _ in List.range n.toNat do
             buf := buf.push 0
           allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes buf) }
-        | [_cls@(.classObj _)] =>
-          throwTypeError "bytes.__new__() missing required argument"
-        | _ => throwTypeError "bytes.__new__(cls, value) requires a class and bytes"
+        | some (.instance iref) => do
+          let id_ ← heapGetInstanceData iref
+          match id_.wrappedValue with
+          | some (.bytes b) =>
+            allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes b) }
+          | _ => throwTypeError s!"bytes.__new__: cannot convert {typeName (.instance iref)} to bytes"
+        | none =>
+          allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes ByteArray.empty) }
+        | some other => throwTypeError s!"bytes.__new__: cannot convert {typeName other} to bytes"
       else if name.startsWith "int." then do
         -- Dispatch int dunder methods: extract wrapped int values
         let methodName := String.ofList (name.toList.drop "int.".length)
@@ -1608,6 +1622,114 @@ partial def callValueDispatch (callee : Value) (args : List Value)
               return .int bits
           | _ => throwTypeError "int.bit_length takes 1 argument"
         | _ => throwTypeError s!"int.{methodName} is not implemented"
+      else if name.startsWith "bytes." && name != "bytes.__new__" then do
+        -- Dispatch bytes dunder methods: extract wrapped bytes values
+        let methodName := String.ofList (name.toList.drop "bytes.".length)
+        let extractBytes : Value → InterpM ByteArray := fun v =>
+          match v with
+          | .bytes b => pure b
+          | .instance iref => do
+            let id_ ← heapGetInstanceData iref
+            match id_.wrappedValue with
+            | some (.bytes b) => pure b
+            | _ => throwTypeError s!"expected bytes, got {typeName v}"
+          | other => throwTypeError s!"expected bytes, got {typeName other}"
+        match methodName with
+        | "__len__" => match args with
+          | [a] => return .int (← extractBytes a).size
+          | _ => throwTypeError "bytes.__len__ takes 1 argument"
+        | "__getitem__" => match args with
+          | [a, .int idx] => do
+            let b ← extractBytes a
+            let i : Int := if idx < 0 then (b.size : Int) + idx else idx
+            if i < 0 || i >= b.size then throwTypeError "index out of range"
+            return .int (b[i.toNat]!.toNat : Int)
+          | _ => throwTypeError "bytes.__getitem__ takes 2 arguments"
+        | "__contains__" => match args with
+          | [a, .int byte_] => do
+            let b ← extractBytes a
+            return .bool (b.toList.any (fun x => x.toNat == byte_.toNat))
+          | _ => return .bool false
+        | "__iter__" => match args with
+          | [a] => do
+            let b ← extractBytes a
+            let items := b.toList.map (fun byte => Value.int byte.toNat)
+            allocGenerator items.toArray
+          | _ => throwTypeError "bytes.__iter__ takes 1 argument"
+        | "__add__" => match args with
+          | [a, b] => return .bytes ((← extractBytes a) ++ (← extractBytes b))
+          | _ => throwTypeError "bytes.__add__ takes 2 arguments"
+        | "__mul__" | "__rmul__" => match args with
+          | [a, .int n] => do
+            let b ← extractBytes a
+            if n <= 0 then return .bytes ByteArray.empty
+            else
+              let mut result := ByteArray.empty
+              for _ in [:n.toNat] do result := result ++ b
+              return .bytes result
+          | _ => throwTypeError "bytes.__mul__ takes 2 arguments"
+        | "__eq__" => match args with
+          | [a, b] => return .bool ((← extractBytes a) == (← extractBytes b))
+          | _ => throwTypeError "bytes.__eq__ takes 2 arguments"
+        | "__ne__" => match args with
+          | [a, b] => return .bool ((← extractBytes a) != (← extractBytes b))
+          | _ => throwTypeError "bytes.__ne__ takes 2 arguments"
+        | "__hash__" => match args with
+          | [a] => do
+            let b ← extractBytes a
+            let h := hash b.toList
+            return .int h.toNat
+          | _ => throwTypeError "bytes.__hash__ takes 1 argument"
+        | "__repr__" | "__str__" => match args with
+          | [a] => do
+            let b ← extractBytes a
+            -- Simple hex representation
+            let hexDigit (n : Nat) : Char := if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
+            let mut s := "b'"
+            for byte in b.toList do
+              let hi := byte.toNat / 16
+              let lo := byte.toNat % 16
+              s := s ++ s!"\\x{String.ofList [hexDigit hi, hexDigit lo]}"
+            s := s ++ "'"
+            return .str s
+          | _ => throwTypeError "bytes.__repr__ takes 1 argument"
+        | "hex" => match args with
+          | [a] => do
+            let b ← extractBytes a
+            let mut result := ""
+            for byte in b.toList do
+              let hi := byte.toNat / 16
+              let lo := byte.toNat % 16
+              let hexDigit (n : Nat) : Char := if n < 10 then Char.ofNat (48 + n) else Char.ofNat (87 + n)
+              result := result ++ String.ofList [hexDigit hi, hexDigit lo]
+            return .str result
+          | _ => throwTypeError "bytes.hex takes 1 argument"
+        | "fromhex" => match args with
+          | [.str hex] => do
+            let cleaned := hex.toList.filter (· != ' ')
+            let mut result := ByteArray.empty
+            let mut i := 0
+            while i + 1 < cleaned.length do
+              let hi := cleaned[i]!
+              let lo := cleaned[i+1]!
+              let hexVal (c : Char) : Nat :=
+                if c.val >= 48 && c.val <= 57 then c.val.toNat - 48
+                else if c.val >= 65 && c.val <= 70 then c.val.toNat - 55
+                else if c.val >= 97 && c.val <= 102 then c.val.toNat - 87
+                else 0
+              result := result.push (hexVal hi * 16 + hexVal lo).toUInt8
+              i := i + 2
+            return .bytes result
+          | _ => throwTypeError "bytes.fromhex takes 1 argument"
+        | "decode" => match args with
+          | [a] => do
+            let b ← extractBytes a
+            return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
+          | [a, _encoding] => do
+            let b ← extractBytes a
+            return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
+          | _ => throwTypeError "bytes.decode takes at most 1 argument"
+        | _ => throwTypeError s!"bytes.{methodName} is not implemented"
       else
         callBuiltin name args kwargs
   | .function ref => do
@@ -3598,7 +3720,16 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
   | .dict ref => callDictMethod ref method args
   | .str s => callStrMethod s method args
   | .set ref => callSetMethod ref method args
-  | .int n => callIntMethod n method args
+  | .int n => do
+    -- Convert known kwargs to positional args for builtin int methods
+    let args' ← if kwargs.isEmpty then pure args else
+      match method with
+      | "to_bytes" =>
+        let length := kwargs.find? (·.1 == "length") |>.map (·.2) |>.getD (.int 1)
+        let byteorder := kwargs.find? (·.1 == "byteorder") |>.map (·.2) |>.getD (.str "big")
+        pure (args ++ [length, byteorder])
+      | _ => pure args
+    callIntMethod n method args'
   | .bytes b => callBytesMethod b method args
   | .tuple arr => callTupleMethod arr method args
   | .builtin name => callBuiltinTypeMethod name method args
@@ -3629,15 +3760,15 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
       | _ => pure ()
     match found with
     | some (.classMethod innerFn) =>
-      callValueDispatch innerFn (receiver :: args) []
+      callValueDispatch innerFn (receiver :: args) kwargs
     | some (.staticMethod innerFn) =>
-      callValueDispatch innerFn args []
+      callValueDispatch innerFn args kwargs
     | some (.function fref) => do
       -- Regular function called on class (no self binding)
       let fd ← heapGetFunc fref
-      let scope ← bindFuncParams fd.params args [] fd.defaults fd.kwDefaults
+      let scope ← bindFuncParams fd.params args kwargs fd.defaults fd.kwDefaults
       callRegularFunc fd scope
-    | some fn => callValueDispatch fn args []
+    | some fn => callValueDispatch fn args kwargs
     | none => throwAttributeError s!"type object '{cd.name}' has no attribute '{method}'"
   | .instance iref => do
     -- Look up method in instance's class MRO and call with self
@@ -3703,16 +3834,16 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
         match fn with
         | .classMethod innerFn =>
           -- Call with class as first arg instead of instance
-          callValueDispatch innerFn (id_.cls :: args) []
+          callValueDispatch innerFn (id_.cls :: args) kwargs
         | .staticMethod innerFn =>
           -- Call without self
-          callValueDispatch innerFn args []
+          callValueDispatch innerFn args kwargs
         | .function fref => do
           let fd ← heapGetFunc fref
-          let scope ← bindFuncParams fd.params (receiver :: args) [] fd.defaults fd.kwDefaults
+          let scope ← bindFuncParams fd.params (receiver :: args) kwargs fd.defaults fd.kwDefaults
           let scopeWithClass := scope.insert "__class__" definingCls
           callRegularFunc fd scopeWithClass
-        | _ => callValueDispatch fn (receiver :: args) []
+        | _ => callValueDispatch fn (receiver :: args) kwargs
       | none => throwAttributeError s!"'{cd.name}' object has no attribute '{method}'"
     | _ => throwAttributeError s!"instance has no attribute '{method}'"
   | .superObj startAfterCls inst => do
@@ -3744,19 +3875,19 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
         match fn with
         | .function fref => do
           let fd ← heapGetFunc fref
-          let scope ← bindFuncParams fd.params (inst :: args) [] fd.defaults fd.kwDefaults
+          let scope ← bindFuncParams fd.params (inst :: args) kwargs fd.defaults fd.kwDefaults
           let scopeWithClass := scope.insert "__class__" definingCls
           callRegularFunc fd scopeWithClass
         | .classMethod innerFn =>
           -- classmethod: call with class as first arg
-          callValueDispatch innerFn (inst :: args) []
+          callValueDispatch innerFn (inst :: args) kwargs
         | .staticMethod innerFn =>
           -- staticmethod: call without self
-          callValueDispatch innerFn args []
+          callValueDispatch innerFn args kwargs
         | .builtin _ =>
           -- Builtins in synthetic type classes: prepend inst (self/cls)
-          callValueDispatch fn (inst :: args) []
-        | _ => callValueDispatch fn (inst :: args) []
+          callValueDispatch fn (inst :: args) kwargs
+        | _ => callValueDispatch fn (inst :: args) kwargs
       | none => throwAttributeError s!"'super' object has no attribute '{method}'"
     | _ => throwAttributeError s!"'super' object has no attribute '{method}'"
   | _ => throwAttributeError s!"'{typeName receiver}' object has no attribute '{method}'"

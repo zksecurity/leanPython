@@ -396,6 +396,13 @@ partial def evalBinOp (op : BinOp) (left right : Value) : InterpM Value := do
     | .str s, .int n | .int n, .str s =>
       if n <= 0 then return .str ""
       else return .str (String.join (List.replicate n.toNat s))
+    | .bytes b, .int n | .int n, .bytes b =>
+      if n <= 0 then return .bytes ByteArray.empty
+      else
+        let mut result := ByteArray.empty
+        for _ in [:n.toNat] do
+          result := result ++ b
+        return .bytes result
     | .list ref, .int n | .int n, .list ref => do
       let arr ← heapGetList ref
       if n <= 0 then allocList #[]

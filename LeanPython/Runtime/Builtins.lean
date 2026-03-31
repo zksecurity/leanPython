@@ -338,6 +338,7 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
         | "dict" => tn == "dict"
         | "set" => tn == "set"
         | "bytes" => tn == "bytes"
+        | "bytearray" => tn == "bytearray"
         | _ => false
       if isMatch then return .bool true
       -- For instances, check if any class in MRO is the synthetic built-in type
@@ -379,6 +380,28 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
               if mcd.name == bname then return .bool true
             | _ => pure ()
         | _ => pure ()
+      | _ => pure ()
+    return .bool false
+  | [obj, .tuple classes] => do
+    -- isinstance(non-instance, (ClassA, ClassB, ...))
+    let tn := typeName obj
+    for cls in classes do
+      match cls with
+      | .builtin bname =>
+        if bname == "object" then return .bool true
+        let isMatch := match bname with
+          | "int" => tn == "int" || tn == "bool"
+          | "float" => tn == "float"
+          | "str" => tn == "str"
+          | "bool" => tn == "bool"
+          | "list" => tn == "list"
+          | "tuple" => tn == "tuple"
+          | "dict" => tn == "dict"
+          | "set" => tn == "set"
+          | "bytes" => tn == "bytes"
+          | "bytearray" => tn == "bytearray"
+          | _ => false
+        if isMatch then return .bool true
       | _ => pure ()
     return .bool false
   | [_, .classObj _] => return .bool false  -- non-instance is not an instance of a custom class
@@ -442,6 +465,7 @@ def builtinChr (args : List Value) : InterpM Value := do
 def builtinPow (args : List Value) : InterpM Value := do
   match args with
   | [base, exp] => evalBinOp .pow base exp
+  | [base, exp, .none] => evalBinOp .pow base exp
   | [.int base, .int exp, .int m] =>
     if m == 0 then throwValueError "pow() 3rd argument cannot be 0"
     else if exp < 0 then throwValueError "pow() 2nd argument cannot be negative when 3rd argument specified"
@@ -647,6 +671,28 @@ partial def callBuiltin (name : String) (args : List Value)
         for _ in [:n.toNat] do ba := ba.push 0
         return .bytes ba
     | [.bytes b] => return .bytes b
+    | [.instance iref] => do
+      let id_ ← heapGetInstanceData iref
+      match id_.wrappedValue with
+      | some (.bytes b) => return .bytes b
+      | some (.int n) =>
+        -- bytes(int_subclass_instance) - like bytes(n) for zero-filled
+        if n < 0 then throwValueError "negative count"
+        else
+          let mut ba := ByteArray.empty
+          for _ in [:n.toNat] do ba := ba.push 0
+          return .bytes ba
+      | _ =>
+        -- Try iterating over the instance
+        let items ← iterValues (.instance iref)
+        let mut result := ByteArray.empty
+        for item in items do
+          match item with
+          | .int n =>
+            if n < 0 || n > 255 then throwValueError "bytes must be in range(0, 256)"
+            else result := result.push n.toNat.toUInt8
+          | _ => throwTypeError "cannot convert to bytes"
+        return .bytes result
     | [v] => do
       let items ← iterValues v
       let mut result := ByteArray.empty
@@ -658,6 +704,28 @@ partial def callBuiltin (name : String) (args : List Value)
         | _ => throwTypeError "cannot convert to bytes"
       return .bytes result
     | _ => throwTypeError "bytes() takes at most 1 argument"
+  | "bytearray" => do
+    -- bytearray behaves like bytes for construction, returns bytes
+    match args with
+    | [] => return .bytes ByteArray.empty
+    | [.int n] =>
+      if n < 0 then throwValueError "negative count"
+      else
+        let mut ba := ByteArray.empty
+        for _ in [:n.toNat] do ba := ba.push 0
+        return .bytes ba
+    | [.bytes b] => return .bytes b
+    | [v] => do
+      let items ← iterValues v
+      let mut result := ByteArray.empty
+      for item in items do
+        match item with
+        | .int n =>
+          if n < 0 || n > 255 then throwValueError "bytes must be in range(0, 256)"
+          else result := result.push n.toNat.toUInt8
+        | _ => throwTypeError "cannot convert to bytes"
+      return .bytes result
+    | _ => throwTypeError "bytearray() takes at most 1 argument"
   | "iter" => do
     match args with
     | [.generator ref] => return .generator ref

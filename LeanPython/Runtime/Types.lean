@@ -348,7 +348,7 @@ def builtinNames : List String :=
    "sum", "any", "all", "hash", "id", "input", "ord", "chr",
    "hex", "oct", "bin", "round", "pow", "divmod", "map", "filter",
    "iter", "next", "hasattr", "getattr", "setattr", "callable",
-   "issubclass", "super", "object", "bytes",
+   "issubclass", "super", "object", "bytes", "bytearray",
    "staticmethod", "classmethod", "property",
    -- Dataclass
    "dataclass",
