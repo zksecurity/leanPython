@@ -1,6 +1,6 @@
 name = "LeanPython"
 version = "0.1.0"
-defaultTargets = ["LeanPython"]
+defaultTargets = ["LeanPython", "leanPython"]
 testDriver = "LeanPythonTest"
 
 [[lean_lib]]
