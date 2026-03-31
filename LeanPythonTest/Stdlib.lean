@@ -826,3 +826,61 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- @classmethod + @override stacking (leanSpec pattern)
 #eval assertPy "from abc import ABC, abstractmethod\nfrom typing import override\nclass SSZType(ABC):\n    @classmethod\n    @abstractmethod\n    def is_fixed_size(cls):\n        pass\n    @classmethod\n    @abstractmethod\n    def get_byte_length(cls):\n        pass\nclass BaseUint(int, SSZType):\n    __slots__ = ()\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    @override\n    def is_fixed_size(cls):\n        return True\n    @classmethod\n    @override\n    def get_byte_length(cls):\n        return cls.BITS // 8\nclass Uint64(BaseUint):\n    BITS = 64\nprint(Uint64.is_fixed_size())\nprint(Uint64.get_byte_length())" "True\n8\n"
+
+-- ============================================================
+-- Phase 9a continued: int/bytes subclass interop with builtins
+-- ============================================================
+
+-- hex() on int subclass instance
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint64(BaseUint):\n    pass\nprint(hex(Uint64(42)))\nprint(hex(Uint64(255)))" "0x2a\n0xff\n"
+
+-- bin() on int subclass instance
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    pass\nprint(bin(Uint8(42)))" "0b101010\n"
+
+-- oct() on int subclass instance
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    pass\nprint(oct(Uint8(42)))" "0o52\n"
+
+-- range() with int subclass instances
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    pass\nresult = list(range(Uint8(5)))\nprint(result)" "[0, 1, 2, 3, 4]\n"
+
+-- range(start, stop, step) with int subclass instances
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    pass\nresult = list(range(Uint8(2), Uint8(8), Uint8(2)))\nprint(result)" "[2, 4, 6]\n"
+
+-- divmod() with int subclass instances
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint64(BaseUint):\n    pass\nresult = divmod(Uint64(100), Uint64(3))\nprint(result[0])\nprint(result[1])" "33\n1\n"
+
+-- List indexing with int subclass instance
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint64(BaseUint):\n    pass\ndata = ['a', 'b', 'c', 'd', 'e']\nprint(data[Uint64(2)])\nprint(data[Uint64(0)])\nprint(data[Uint64(4)])" "c\na\ne\n"
+
+-- Slice with int subclass instances
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    pass\ndata = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]\nprint(data[Uint8(2):Uint8(7)])" "[2, 3, 4, 5, 6]\n"
+
+-- repr() and str() on int subclass via Python-defined __repr__/__str__
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __repr__(self):\n        return type(self).__name__ + '(' + str(int(self)) + ')'\n    def __str__(self):\n        return str(int(self))\nclass Uint64(BaseUint):\n    pass\nx = Uint64(42)\nprint(repr(x))\nprint(str(x))" "Uint64(42)\n42\n"
+
+-- int() conversion of int subclass instance
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint64(BaseUint):\n    pass\nx = Uint64(42)\nresult = int(x)\nprint(result)\nprint(result == 42)" "42\nTrue\n"
+
+-- bytes.__radd__: b"\xff" + bytes_subclass_instance
+#eval assertPy "class BaseBytes(bytes):\n    def __new__(cls, value=b''):\n        return super().__new__(cls, value)\nclass Bytes4(BaseBytes):\n    pass\nx = Bytes4(b'\\x01\\x02\\x03\\x04')\nresult = b'\\xff' + x\nprint(len(result))\nprint(result[0])\nprint(result[4])" "5\n255\n4\n"
+
+-- sorted() on bytes subclass instances (lexicographic)
+#eval assertPy "class BaseBytes(bytes):\n    def __new__(cls, value=b''):\n        return super().__new__(cls, value)\nclass Bytes4(BaseBytes):\n    pass\na = Bytes4(b'\\x00\\x00\\x00\\x02')\nb = Bytes4(b'\\x00\\x00\\x00\\x01')\nc = Bytes4(b'\\xff\\xff\\xff\\xff')\nresult = sorted([c, a, b])\nprint(bytes(result[0]).hex())\nprint(bytes(result[1]).hex())\nprint(bytes(result[2]).hex())" "00000001\n00000002\nffffffff\n"
+
+-- In-place operators: x += Uint64(5)
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __add__(self, other):\n        return type(self)(int(self) + int(other))\nclass Uint64(BaseUint):\n    pass\nx = Uint64(10)\ny = x\nx += Uint64(5)\nprint(int(x))\nprint(type(x).__name__)\nprint(int(y))" "15\nUint64\n10\n"
+
+-- Reverse operators: plain int + Uint raises TypeError when __radd__ checks type
+#eval assertPy "class BaseUint(int):\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __radd__(self, other):\n        if not isinstance(other, BaseUint):\n            raise TypeError('bad type for +')\n        return type(self)(int(other) + int(self))\nclass Uint64(BaseUint):\n    pass\ntry:\n    result = 100 + Uint64(3)\n    print('no error')\nexcept TypeError as e:\n    print(str(e))" "bad type for +\n"
+
+-- io.BytesIO seek and read round-trip
+#eval assertPy "import io\nstream = io.BytesIO()\nstream.write(b'\\x01\\x02\\x03\\x04')\nstream.seek(0)\ndata = stream.read()\nprint(len(data))\nprint(data[0])\nprint(data[3])" "4\n1\n4\n"
+
+-- BaseBytes __add__ returns raw bytes
+#eval assertPy "class BaseBytes(bytes):\n    def __new__(cls, value=b''):\n        return super().__new__(cls, value)\nclass Bytes4(BaseBytes):\n    pass\na = Bytes4(b'\\x01\\x02\\x03\\x04')\nb = Bytes4(b'\\x05\\x06\\x07\\x08')\nresult = a + b\nprint(len(result))\nprint(result[0])\nprint(result[7])" "8\n1\n8\n"
+
+-- Boolean type: construction, validation, arithmetic rejection
+#eval assertPy "class Boolean(int):\n    def __new__(cls, value):\n        if not isinstance(value, int):\n            raise TypeError('Expected bool or int')\n        if value not in (0, 1):\n            raise ValueError('Boolean value must be 0 or 1')\n        return super().__new__(cls, value)\n    def __add__(self, other):\n        raise TypeError('Arithmetic not supported for Boolean.')\n    def __eq__(self, other):\n        return isinstance(other, int) and int(self) == int(other)\nbt = Boolean(True)\nbf = Boolean(False)\nprint(int(bt))\nprint(int(bf))\nprint(bt == 1)\nprint(bf == 0)\ntry:\n    bt + bf\nexcept TypeError as e:\n    print(str(e))" "1\n0\nTrue\nTrue\nArithmetic not supported for Boolean.\n"
+
+-- Boolean rejects invalid values
+#eval assertPyError "class Boolean(int):\n    def __new__(cls, value):\n        if value not in (0, 1):\n            raise ValueError('must be 0 or 1')\n        return super().__new__(cls, value)\nBoolean(2)" "must be 0 or 1"

@@ -594,42 +594,59 @@ private def isIdentical : Value → Value → Bool
   | .instance a, .instance b => a == b
   | _, _ => false
 
+/-- Unwrap an instance's wrappedValue to a primitive value for comparison. -/
+private partial def unwrapForCmp (v : Value) : InterpM Value := do
+  match v with
+  | .instance iref =>
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some inner => pure inner
+    | none => pure v
+  | _ => pure v
+
 /-- Evaluate a single comparison operation. -/
-partial def evalCmpOp (op : CmpOp) (left right : Value) : InterpM Bool :=
+partial def evalCmpOp (op : CmpOp) (left right : Value) : InterpM Bool := do
+  -- Unwrap instances with wrappedValue for comparison dispatch
+  let left' ← unwrapForCmp left
+  let right' ← unwrapForCmp right
   match op with
   | .eq => valueEq left right
   | .notEq => do return !(← valueEq left right)
   | .lt => do
-    match ← numericCompare left right with
+    match ← numericCompare left' right' with
     | some .lt => return true
     | some _ => return false
     | none =>
-      match left, right with
+      match left', right' with
       | .str a, .str b => return (a < b)
+      | .bytes a, .bytes b => return (a.toList < b.toList)
       | _, _ => throwTypeError s!"'<' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .ltE => do
-    match ← numericCompare left right with
+    match ← numericCompare left' right' with
     | some .gt => return false
     | some _ => return true
     | none =>
-      match left, right with
+      match left', right' with
       | .str a, .str b => return (decide (a ≤ b))
+      | .bytes a, .bytes b => return (a.toList < b.toList || a == b)
       | _, _ => throwTypeError s!"'<=' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .gt => do
-    match ← numericCompare left right with
+    match ← numericCompare left' right' with
     | some .gt => return true
     | some _ => return false
     | none =>
-      match left, right with
+      match left', right' with
       | .str a, .str b => return (decide (a > b))
+      | .bytes a, .bytes b => return (b.toList < a.toList)
       | _, _ => throwTypeError s!"'>' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .gtE => do
-    match ← numericCompare left right with
+    match ← numericCompare left' right' with
     | some .lt => return false
     | some _ => return true
     | none =>
-      match left, right with
+      match left', right' with
       | .str a, .str b => return (decide (a ≥ b))
+      | .bytes a, .bytes b => return (b.toList < a.toList || a == b)
       | _, _ => throwTypeError s!"'>=' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .is_ => return (isIdentical left right)
   | .isNot => return (!isIdentical left right)

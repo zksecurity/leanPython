@@ -37,6 +37,22 @@ open LeanPython.Stdlib.Time
 open LeanPython.Stdlib.Logging
 
 -- ============================================================
+-- Helpers
+-- ============================================================
+
+/-- Extract an Int from a Value, handling int subclass instances (wrappedValue). -/
+partial def extractIntValue (v : Value) : InterpM Int := do
+  match v with
+  | .int n => pure n
+  | .bool b => pure (if b then 1 else 0)
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some (.int n) => pure n
+    | _ => throwTypeError s!"'{typeName v}' cannot be interpreted as an integer"
+  | _ => throwTypeError s!"'{typeName v}' cannot be interpreted as an integer"
+
+-- ============================================================
 -- Individual builtin implementations
 -- ============================================================
 
@@ -71,10 +87,11 @@ partial def builtinLen (args : List Value) : InterpM Value := do
 /-- `range(stop)` or `range(start, stop[, step])` - materializes to list. -/
 partial def builtinRange (args : List Value) : InterpM Value := do
   let (start_, stop_, step_) ← match args with
-    | [.int n] => pure (0, n, (1 : Int))
-    | [.int s, .int e] => pure (s, e, (1 : Int))
-    | [.int s, .int e, .int st] => pure (s, e, st)
-    | [.bool b] => pure (0, (if b then 1 else 0 : Int), (1 : Int))
+    | [a] => do let n ← extractIntValue a; pure (0, n, (1 : Int))
+    | [a, b] => do let s ← extractIntValue a; let e ← extractIntValue b; pure (s, e, (1 : Int))
+    | [a, b, c] => do
+      let s ← extractIntValue a; let e ← extractIntValue b; let st ← extractIntValue c
+      pure (s, e, st)
     | _ => throwTypeError "range() requires int arguments"
   if step_ == 0 then
     throwValueError "range() arg 3 must not be zero"
@@ -482,9 +499,11 @@ def builtinPow (args : List Value) : InterpM Value := do
   | _ => throwTypeError "pow() takes 2 or 3 arguments"
 
 /-- `divmod(a, b)` -/
-def builtinDivmod (args : List Value) : InterpM Value := do
+partial def builtinDivmod (args : List Value) : InterpM Value := do
   match args with
-  | [.int a, .int b] =>
+  | [va, vb] => do
+    let a ← extractIntValue va
+    let b ← extractIntValue vb
     if b == 0 then throwZeroDivision "integer division or modulo by zero"
     else return .tuple #[.int (Int.fdiv a b), .int (Int.fmod a b)]
   | _ => throwTypeError "divmod() requires two integer arguments"
@@ -634,7 +653,8 @@ partial def callBuiltin (name : String) (args : List Value)
     | _ => throwTypeError "input() takes at most 1 argument"
   | "hex" => do
     match args with
-    | [.int n] =>
+    | [v] => do
+      let n ← extractIntValue v
       let digits := Nat.toDigits 16 n.natAbs
       let s := String.ofList digits
       if n >= 0 then return .str s!"0x{s}"
@@ -642,7 +662,8 @@ partial def callBuiltin (name : String) (args : List Value)
     | _ => throwTypeError "hex() takes exactly one argument"
   | "oct" => do
     match args with
-    | [.int n] =>
+    | [v] => do
+      let n ← extractIntValue v
       let digits := Nat.toDigits 8 n.natAbs
       let s := String.ofList digits
       if n >= 0 then return .str s!"0o{s}"
@@ -650,7 +671,8 @@ partial def callBuiltin (name : String) (args : List Value)
     | _ => throwTypeError "oct() takes exactly one argument"
   | "bin" => do
     match args with
-    | [.int n] =>
+    | [v] => do
+      let n ← extractIntValue v
       let digits := Nat.toDigits 2 n.natAbs
       let s := String.ofList digits
       if n >= 0 then return .str s!"0b{s}"

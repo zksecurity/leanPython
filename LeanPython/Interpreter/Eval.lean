@@ -60,21 +60,47 @@ private def dummySpan : SourceSpan :=
   { start := { line := 0, column := 0, offset := 0 }
     stop := { line := 0, column := 0, offset := 0 } }
 
-private def computeSliceIndices (len : Int) (startOpt stopOpt stepOpt : Option Value)
+/-- Try to coerce a Value to Int for indexing (handles int subclass instances). -/
+private def coerceToInt (v : Value) : Option Int :=
+  match v with
+  | .int n => some n
+  | .bool b => some (if b then 1 else 0)
+  | _ => none
+
+/-- Try to coerce a Value to Int, including instances with wrappedValue. -/
+private partial def coerceToIntM (v : Value) : InterpM (Option Int) := do
+  match v with
+  | .int n => pure (some n)
+  | .bool b => pure (some (if b then 1 else 0))
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some (.int n) => pure (some n)
+    | _ => pure none
+  | _ => pure none
+
+private partial def computeSliceIndices (len : Int) (startOpt stopOpt stepOpt : Option Value)
     : InterpM (Int × Int × Int) := do
-  let step : Int := match stepOpt with
-    | some (.int s) => s
-    | some (.none) | none => 1
-    | _ => 1
+  let extractSliceInt (v : Value) : InterpM (Option Int) := coerceToIntM v
+  let step : Int ← match stepOpt with
+    | some v => do
+      match ← extractSliceInt v with
+      | some s => pure s
+      | none => pure 1
+    | none => pure 1
   if step == 0 then throwValueError "slice step cannot be zero"
-  let start : Int := match startOpt with
-    | some (.int s) => if s < 0 then max 0 (len + s) else min s len
-    | some (.none) | none => if step > 0 then 0 else len - 1
-    | _ => if step > 0 then 0 else len - 1
-  let stop : Int := match stopOpt with
-    | some (.int s) => if s < 0 then max 0 (len + s) else min s len
-    | some (.none) | none => if step > 0 then len else -1
-    | _ => if step > 0 then len else -1
+  let start : Int ← match startOpt with
+    | some v => do
+      match ← extractSliceInt v with
+      | some s => pure (if s < 0 then max 0 (len + s) else min s len)
+      | none => pure (if step > 0 then 0 else len - 1)
+    | none => pure (if step > 0 then 0 else len - 1)
+  let stop : Int ← match stopOpt with
+    | some v => do
+      match ← extractSliceInt v with
+      | some s => pure (if s < 0 then max 0 (len + s) else min s len)
+      | none => pure (if step > 0 then len else -1)
+    | none => pure (if step > 0 then len else -1)
   return (start, stop, step)
 
 private def sliceIndices (start stop step : Int) : List Nat :=
@@ -1659,6 +1685,9 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         | "__add__" => match args with
           | [a, b] => return .bytes ((← extractBytes a) ++ (← extractBytes b))
           | _ => throwTypeError "bytes.__add__ takes 2 arguments"
+        | "__radd__" => match args with
+          | [a, b] => return .bytes ((← extractBytes b) ++ (← extractBytes a))
+          | _ => throwTypeError "bytes.__radd__ takes 2 arguments"
         | "__mul__" | "__rmul__" => match args with
           | [a, .int n] => do
             let b ← extractBytes a
@@ -1674,6 +1703,26 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         | "__ne__" => match args with
           | [a, b] => return .bool ((← extractBytes a) != (← extractBytes b))
           | _ => throwTypeError "bytes.__ne__ takes 2 arguments"
+        | "__lt__" => match args with
+          | [a, b] => do
+            let ba ← extractBytes a; let bb ← extractBytes b
+            return .bool (ba.toList < bb.toList)
+          | _ => throwTypeError "bytes.__lt__ takes 2 arguments"
+        | "__le__" => match args with
+          | [a, b] => do
+            let ba ← extractBytes a; let bb ← extractBytes b
+            return .bool (ba.toList < bb.toList || ba == bb)
+          | _ => throwTypeError "bytes.__le__ takes 2 arguments"
+        | "__gt__" => match args with
+          | [a, b] => do
+            let ba ← extractBytes a; let bb ← extractBytes b
+            return .bool (bb.toList < ba.toList)
+          | _ => throwTypeError "bytes.__gt__ takes 2 arguments"
+        | "__ge__" => match args with
+          | [a, b] => do
+            let ba ← extractBytes a; let bb ← extractBytes b
+            return .bool (bb.toList < ba.toList || ba == bb)
+          | _ => throwTypeError "bytes.__ge__ takes 2 arguments"
         | "__hash__" => match args with
           | [a] => do
             let b ← extractBytes a
@@ -2382,6 +2431,15 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
 
 -- Subscript access
 partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
+  -- Coerce instance indices with wrappedValue to plain .int
+  let idx ← do
+    match idx with
+    | .instance iref =>
+      let id_ ← heapGetInstanceData iref
+      match id_.wrappedValue with
+      | some (.int n) => pure (.int n)
+      | _ => pure idx
+    | _ => pure idx
   match obj with
   | .list ref => do
     let arr ← heapGetList ref
