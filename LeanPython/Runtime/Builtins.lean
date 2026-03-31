@@ -835,6 +835,7 @@ partial def callBuiltin (name : String) (args : List Value)
   | "math.ceil"  => mathCeil args
   | "math.floor" => mathFloor args
   | "math.sqrt"  => mathSqrt args
+  | "math.isqrt" => mathIsqrt args
   | "math.log"   => mathLog args
   | "math.log2"  => mathLog2 args
   | "math.fabs"  => mathFabs args

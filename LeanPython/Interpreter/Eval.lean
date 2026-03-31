@@ -2914,6 +2914,7 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "fabs"  (.builtin "math.fabs")
     ns := ns.insert "isnan" (.builtin "math.isnan")
     ns := ns.insert "isinf" (.builtin "math.isinf")
+    ns := ns.insert "isqrt" (.builtin "math.isqrt")
     ns := ns.insert "inf"   (.float (1.0 / 0.0))
     ns := ns.insert "nan"   (.float (0.0 / 0.0))
     ns := ns.insert "pi"    (.float 3.141592653589793)

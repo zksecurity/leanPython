@@ -95,4 +95,23 @@ partial def mathIsinf (args : List Value) : InterpM Value := do
   | [.int _] => return .bool false
   | _ => throwTypeError "math.isinf() requires a numeric argument"
 
+/-- Newton step for integer square root. -/
+private partial def isqrtLoop (n x : Nat) : Nat :=
+  let y := (x + n / x) / 2
+  if y < x then isqrtLoop n y else x
+
+/-- Integer square root: largest k such that k*k <= n. -/
+private def natIsqrt (n : Nat) : Nat :=
+  if n == 0 then 0
+  else isqrtLoop n n
+
+/-- Python math.isqrt: return integer square root of non-negative integer -/
+partial def mathIsqrt (args : List Value) : InterpM Value := do
+  match args with
+  | [.int n] =>
+    if n < 0 then throwValueError "isqrt() argument must be nonnegative"
+    else return .int (Int.ofNat (natIsqrt n.toNat))
+  | [.bool b] => return .int (if b then 1 else 0)
+  | _ => throwTypeError "math.isqrt() requires an integer argument"
+
 end LeanPython.Stdlib.Math
