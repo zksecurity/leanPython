@@ -32,6 +32,12 @@ inductive LexError where
 instance : Repr ByteArray where
   reprPrec ba _ := repr ba.toList
 
+/-- A part of an f-string: either literal text or an expression with optional conversion. -/
+inductive FStringPart where
+  | literal : String → FStringPart
+  | expr    : String → Option Char → FStringPart  -- expression source, conversion flag (!r !s !a)
+  deriving Repr, BEq
+
 /-- Python token kind. -/
 inductive TokenKind where
   | name          : String → TokenKind
@@ -40,9 +46,7 @@ inductive TokenKind where
   | imaginary     : Float → TokenKind
   | string        : String → TokenKind
   | bytes         : ByteArray → TokenKind
-  | fstringStart  : TokenKind
-  | fstringMiddle : String → TokenKind
-  | fstringEnd    : TokenKind
+  | fstringToken  : Array FStringPart → TokenKind
   | keyword       : Keyword → TokenKind
   | operator      : Operator → TokenKind
   | delimiter     : Delimiter → TokenKind
@@ -62,9 +66,7 @@ instance : BEq TokenKind where
     | .imaginary a, .imaginary b => a == b
     | .string a, .string b => a == b
     | .bytes a, .bytes b => a == b
-    | .fstringStart, .fstringStart => true
-    | .fstringMiddle a, .fstringMiddle b => a == b
-    | .fstringEnd, .fstringEnd => true
+    | .fstringToken a, .fstringToken b => a == b
     | .keyword a, .keyword b => a == b
     | .operator a, .operator b => a == b
     | .delimiter a, .delimiter b => a == b

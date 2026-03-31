@@ -1,11 +1,12 @@
 import LeanPython.Parser.Tokens
+import LeanPython.Lexer
 import LeanPython.AST.Types
 
 set_option autoImplicit false
 
 namespace LeanPython.Parser
 
-open LeanPython.Lexer (SourceSpan Token TokenKind Keyword Operator Delimiter)
+open LeanPython.Lexer (SourceSpan Token TokenKind Keyword Operator Delimiter FStringPart)
 open LeanPython.AST (Expr Constant BinOp UnaryOp BoolOp CmpOp
                   Comprehension Arg Arguments CallKeyword)
 
@@ -30,6 +31,35 @@ private def tryCmpOp : ParserM (Option CmpOp) := do
 
 mutual
 
+/-- Parse an f-string token into an Expr.fstring AST node.
+    Each expression part is tokenized and parsed as a Python expression. -/
+partial def parseFStringToken (parts : Array FStringPart) (span : SourceSpan) : ParserM Expr := do
+  let mut astParts : List Expr := []
+  for part in parts do
+    match part with
+    | .literal s =>
+      astParts := astParts ++ [.constant (.string s) span]
+    | .expr src conv =>
+      -- Tokenize and parse the expression source
+      match LeanPython.Lexer.tokenize src with
+      | .error _e => throw (.unexpectedToken (.name src) span.start s!"f-string: failed to tokenize expression: {src}")
+      | .ok tokens =>
+        let filtered := tokens.filter fun t =>
+          match t.kind with
+          | .comment _ | .nlToken | .newline | .endmarker => false
+          | _ => true
+        if filtered.isEmpty then
+          throw (.unexpectedToken (.name src) span.start "f-string: empty expression")
+        else
+          -- Parse expression from the token stream
+          let innerState : ParserState := { tokens := filtered, pos := 0 }
+          match (parseExpression).run innerState with
+          | .ok (expr, _) =>
+            astParts := astParts ++ [.formattedValue expr conv none span]
+          | .error e =>
+            throw (.unexpectedToken (.name src) span.start s!"f-string: parse error in expression '{src}': {e}")
+  return .fstring astParts span
+
 /-- Parse a single atom: literal, name, parenthesized expr, list, dict/set. -/
 partial def parseAtom : ParserM Expr := do
   let tok ← match ← peek with
@@ -51,6 +81,7 @@ partial def parseAtom : ParserM Expr := do
                        | _ => break
                      return .constant (.string result) { start := tok.span.start, stop := endSpan.stop }
   | .bytes b     => discard advance; return .constant (.bytes b) tok.span
+  | .fstringToken parts => discard advance; parseFStringToken parts tok.span
   | .name n      => discard advance; return .name n tok.span
   | .keyword .true_  => discard advance; return .constant .true_ tok.span
   | .keyword .false_ => discard advance; return .constant .false_ tok.span

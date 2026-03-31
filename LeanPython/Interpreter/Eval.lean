@@ -633,9 +633,27 @@ partial def evalExpr (e : Expr) : InterpM Value := do
       result := result ++ (← valueToStr s)
     return .str result
 
-  | .formattedValue expr _conv _formatSpec _ => do
+  | .formattedValue expr conv _formatSpec _ => do
     let v ← evalExpr expr
-    return .str (← valueToStr v)
+    -- !r / !a → repr(), !s / none → str()
+    let isRepr := match conv with | some 'r' | some 'a' => true | _ => false
+    let dundrName := if isRepr then "__repr__" else "__str__"
+    let fallbackFn := if isRepr then valueRepr else valueToStr
+    match v with
+    | inst@(.instance _) =>
+      match ← callDunder inst dundrName [] with
+      | some (.str s) => return .str s
+      | some other => return .str (← valueToStr other)
+      | none =>
+        let r ← try
+          let v' ← callBoundMethod inst dundrName []
+          pure (some v')
+        catch _ => pure none
+        match r with
+        | some (.str s) => return .str s
+        | some other => return .str (← valueToStr other)
+        | none => return .str (← fallbackFn inst)
+    | _ => return .str (← fallbackFn v)
 
   | .starred inner _ => evalExpr inner
 

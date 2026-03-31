@@ -24,36 +24,42 @@ partial def callBytesIOMethod (iref : HeapRef) (method : String) (args : List Va
     | _ => 0
   match method with
   | "write" => do
-    match args with
-    | [.bytes data] =>
-      -- Write data at current position, extending buffer if needed
-      let mut newBuf := buf
-      -- Extend buffer if position is past end
-      while newBuf.size < pos do
-        newBuf := newBuf.push 0
-      -- Write the data starting at pos
-      let mut writeBuf := ByteArray.empty
-      -- Copy bytes before pos
-      for i in [:min pos newBuf.size] do
-        writeBuf := writeBuf.push (newBuf.get! i)
-      -- Pad if pos > original size
-      while writeBuf.size < pos do
-        writeBuf := writeBuf.push 0
-      -- Write the new data
-      for i in [:data.size] do
-        writeBuf := writeBuf.push (data.get! i)
-      -- Copy remaining bytes after write region
-      let afterPos := pos + data.size
-      if afterPos < newBuf.size then
-        for i in [afterPos:newBuf.size] do
-          writeBuf := writeBuf.push (newBuf.get! i)
-      let newPos := pos + data.size
-      let attrs := id_.attrs
-        |>.insert "_buffer" (.bytes writeBuf)
-        |>.insert "_pos" (.int newPos)
-      heapSetInstanceData iref { id_ with attrs := attrs }
-      return .int data.size
+    -- Extract bytes from the argument (raw .bytes or instance with wrappedValue)
+    let data ← match args with
+    | [.bytes data] => pure data
+    | [.instance wref] => do
+      let wid ← heapGetInstanceData wref
+      match wid.wrappedValue with
+      | some (.bytes data) => pure data
+      | _ => throwTypeError "BytesIO.write() requires a bytes argument"
     | _ => throwTypeError "BytesIO.write() requires a bytes argument"
+    -- Write data at current position, extending buffer if needed
+    let mut newBuf := buf
+    -- Extend buffer if position is past end
+    while newBuf.size < pos do
+      newBuf := newBuf.push 0
+    -- Write the data starting at pos
+    let mut writeBuf := ByteArray.empty
+    -- Copy bytes before pos
+    for i in [:min pos newBuf.size] do
+      writeBuf := writeBuf.push (newBuf.get! i)
+    -- Pad if pos > original size
+    while writeBuf.size < pos do
+      writeBuf := writeBuf.push 0
+    -- Write the new data
+    for i in [:data.size] do
+      writeBuf := writeBuf.push (data.get! i)
+    -- Copy remaining bytes after write region
+    let afterPos := pos + data.size
+    if afterPos < newBuf.size then
+      for i in [afterPos:newBuf.size] do
+        writeBuf := writeBuf.push (newBuf.get! i)
+    let newPos := pos + data.size
+    let attrs := id_.attrs
+      |>.insert "_buffer" (.bytes writeBuf)
+      |>.insert "_pos" (.int newPos)
+    heapSetInstanceData iref { id_ with attrs := attrs }
+    return .int data.size
   | "read" => do
     let readSize := match args with
       | [.int n] => if n < 0 then buf.size - pos else min n.toNat (buf.size - pos)

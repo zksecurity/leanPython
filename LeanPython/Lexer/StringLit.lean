@@ -185,6 +185,172 @@ private partial def readBytesBody (quote : Char) (triple : Bool) (raw : Bool)
       LexerM.advance
       readBytesBody quote triple raw (acc.push c.toUInt8)
 
+/-- Read a format spec after : in an f-string expression. Consumes up to }. -/
+private partial def readFStringFormatSpec (acc : String) : LexerM String := do
+  match ← LexerM.peekChar with
+  | none =>
+    let pos ← LexerM.currentPos
+    throw (LexError.unterminatedString pos)
+  | some '}' =>
+    LexerM.advance  -- consume }
+    return acc
+  | some c =>
+    LexerM.advance
+    readFStringFormatSpec (acc.push c)
+
+/-- Read a string literal inside an f-string expression (e.g. f"{'hello'}"). -/
+private partial def readFStringInnerString (quote : Char) (acc : String) : LexerM String := do
+  match ← LexerM.peekChar with
+  | none =>
+    let pos ← LexerM.currentPos
+    throw (LexError.unterminatedString pos)
+  | some c =>
+    if c == quote then
+      LexerM.advance
+      return acc.push c
+    else if c == '\\' then
+      LexerM.advance
+      match ← LexerM.peekChar with
+      | some esc => LexerM.advance; readFStringInnerString quote ((acc.push '\\').push esc)
+      | none => let pos ← LexerM.currentPos; throw (LexError.unterminatedString pos)
+    else
+      LexerM.advance
+      readFStringInnerString quote (acc.push c)
+
+/-- Read the expression part of an f-string `{...}`, handling nested braces.
+    Returns the expression source and optional conversion character. -/
+private partial def readFStringExpr (depth : Nat) (acc : String) : LexerM (String × Option Char) := do
+  match ← LexerM.peekChar with
+  | none =>
+    let pos ← LexerM.currentPos
+    throw (LexError.unterminatedString pos)
+  | some '}' =>
+    if depth == 0 then
+      LexerM.advance  -- consume closing }
+      return (acc, none)
+    else
+      LexerM.advance
+      readFStringExpr (depth - 1) (acc.push '}')
+  | some '{' =>
+    LexerM.advance
+    readFStringExpr (depth + 1) (acc.push '{')
+  | some '!' =>
+    -- Check if this is a conversion flag (!r, !s, !a) before }
+    match ← LexerM.peekAhead 1 with
+    | some convChar =>
+      if (convChar == 'r' || convChar == 's' || convChar == 'a') && depth == 0 then
+        -- Check if next char after conversion is } or :
+        match ← LexerM.peekAhead 2 with
+        | some '}' =>
+          LexerM.advance  -- consume !
+          LexerM.advance  -- consume conversion char
+          LexerM.advance  -- consume }
+          return (acc, some convChar)
+        | some ':' =>
+          -- Has format spec after conversion - skip format spec for now
+          LexerM.advance  -- consume !
+          LexerM.advance  -- consume conversion char
+          let _formatSpec ← readFStringFormatSpec ""
+          return (acc, some convChar)
+        | _ =>
+          -- Not a conversion, treat ! as part of expression
+          LexerM.advance
+          readFStringExpr depth (acc.push '!')
+      else
+        LexerM.advance
+        readFStringExpr depth (acc.push '!')
+    | none =>
+      let pos ← LexerM.currentPos
+      throw (LexError.unterminatedString pos)
+  | some ':' =>
+    if depth == 0 then
+      -- Format spec - skip it for now
+      LexerM.advance  -- consume :
+      let _formatSpec ← readFStringFormatSpec ""
+      return (acc, none)
+    else
+      LexerM.advance
+      readFStringExpr depth (acc.push ':')
+  | some '\'' | some '"' =>
+    -- String literal inside expression - read until matching quote
+    let q := (← LexerM.peekChar).get!
+    LexerM.advance
+    let inner ← readFStringInnerString q (acc.push q)
+    readFStringExpr depth inner
+  | some c =>
+    LexerM.advance
+    readFStringExpr depth (acc.push c)
+
+/-- Read the body of an f-string, producing an array of FStringParts.
+    Handles literal text and `{expr}` / `{expr!r}` / `{expr:spec}` expressions. -/
+private partial def readFStringBody (quote : Char) (triple : Bool) (_raw : Bool)
+    (parts : Array FStringPart) (litAcc : String) : LexerM (Array FStringPart) := do
+  match ← LexerM.peekChar with
+  | none =>
+    let pos ← LexerM.currentPos
+    throw (LexError.unterminatedString pos)
+  | some c =>
+    if c == quote then
+      if triple then
+        match ← LexerM.peekAhead 1 with
+        | some c2 =>
+          if c2 == quote then
+            match ← LexerM.peekAhead 2 with
+            | some c3 =>
+              if c3 == quote then
+                LexerM.advance; LexerM.advance; LexerM.advance
+                let parts := if litAcc.isEmpty then parts else parts.push (.literal litAcc)
+                return parts
+              else
+                LexerM.advance
+                readFStringBody quote triple _raw parts (litAcc.push c)
+            | none =>
+              LexerM.advance
+              readFStringBody quote triple _raw parts (litAcc.push c)
+          else
+            LexerM.advance
+            readFStringBody quote triple _raw parts (litAcc.push c)
+        | none =>
+          LexerM.advance
+          readFStringBody quote triple _raw parts (litAcc.push c)
+      else
+        LexerM.advance  -- consume closing quote
+        let parts := if litAcc.isEmpty then parts else parts.push (.literal litAcc)
+        return parts
+    else if c == '{' then
+      -- Check for {{ (escaped brace → literal {)
+      match ← LexerM.peekAhead 1 with
+      | some '{' =>
+        LexerM.advance; LexerM.advance
+        readFStringBody quote triple _raw parts (litAcc.push '{')
+      | _ =>
+        LexerM.advance  -- consume {
+        -- Flush any accumulated literal text
+        let parts := if litAcc.isEmpty then parts else parts.push (.literal litAcc)
+        -- Read expression
+        let (exprSrc, conv) ← readFStringExpr 0 ""
+        let parts := parts.push (.expr exprSrc conv)
+        readFStringBody quote triple _raw parts ""
+    else if c == '}' then
+      -- Check for }} (escaped brace → literal })
+      match ← LexerM.peekAhead 1 with
+      | some '}' =>
+        LexerM.advance; LexerM.advance
+        readFStringBody quote triple _raw parts (litAcc.push '}')
+      | _ =>
+        LexerM.advance
+        readFStringBody quote triple _raw parts (litAcc.push '}')
+    else if c == '\\' then
+      LexerM.advance
+      let escaped ← processEscape
+      readFStringBody quote triple _raw parts (litAcc.push escaped)
+    else if c == '\n' && !triple then
+      let pos ← LexerM.currentPos
+      throw (LexError.unterminatedString pos)
+    else
+      LexerM.advance
+      readFStringBody quote triple _raw parts (litAcc.push c)
+
 /-- Lex a string or bytes literal. Called when current position is at a string prefix
     character or quote character. -/
 partial def lexString (start : SourcePos) : LexerM Token := do
@@ -210,9 +376,10 @@ partial def lexString (start : SourcePos) : LexerM Token := do
           | none => pure false
         else pure false
       | none => pure false
-    -- F-strings: emit fstringStart token
+    -- F-strings: read body and produce fstringToken
     if pfx.fstr then
-      mkToken .fstringStart start
+      let parts ← readFStringBody q triple pfx.raw #[] ""
+      mkToken (.fstringToken parts) start
     -- Bytes strings
     else if pfx.bytes then
       let body ← readBytesBody q triple pfx.raw ByteArray.empty

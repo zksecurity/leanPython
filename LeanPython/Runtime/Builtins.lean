@@ -107,6 +107,17 @@ partial def builtinRange (args : List Value) : InterpM Value := do
       i := i + step_
   allocList elems
 
+/-- Get or create a simple class object for a built-in type name.
+    Returns a classObj with the given __name__. -/
+private partial def getBuiltinTypeObj (name : String) : InterpM Value := do
+  let st ← get
+  -- Check if we already have a cached class object for this type
+  if let some cls := st.builtinTypeClasses[name]? then return cls
+  -- Create a minimal classObj with the correct name
+  let cls ← allocClassObj { name := name, bases := #[], mro := #[], ns := {}, slots := none }
+  modify fun s => { s with builtinTypeClasses := s.builtinTypeClasses.insert name cls }
+  return cls
+
 /-- `type(obj)` - returns the type of an object. -/
 partial def builtinType (args : List Value) : InterpM Value := do
   match args with
@@ -116,7 +127,7 @@ partial def builtinType (args : List Value) : InterpM Value := do
       let id_ ← heapGetInstanceData ref
       return id_.cls
     | .exception typeName _ => return .builtin typeName
-    | _ => return .str s!"<class '{typeName v}'>"
+    | _ => getBuiltinTypeObj (typeName v)
   | _ => throwTypeError "type() takes 1 or 3 arguments"
 
 /-- `int(x)` - convert to int. -/
