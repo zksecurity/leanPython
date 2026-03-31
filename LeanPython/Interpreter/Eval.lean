@@ -459,6 +459,27 @@ partial def callDunder (inst : Value) (name : String) (args : List Value) : Inte
     | _ => some <$> callValueDispatch fn (inst :: args) []
   | none => return none
 
+/-- Extended iterValues that handles instance __iter__ via callDunder. -/
+partial def iterValuesExt (v : Value) : InterpM (Array Value) := do
+  match v with
+  | .instance _ => do
+    match ← callDunder v "__iter__" [] with
+    | some iterResult => iterValues iterResult
+    | none =>
+      -- Try __getitem__ protocol: iterate with indices 0, 1, 2, ...
+      let mut items : Array Value := #[]
+      let mut idx := 0
+      let mut done := false
+      while !done do
+        match ← callDunder v "__getitem__" [.int idx] with
+        | some item =>
+          items := items.push item
+          idx := idx + 1
+        | none => done := true
+      if idx == 0 then throwTypeError s!"'{typeName v}' object is not iterable"
+      return items
+  | _ => iterValues v
+
 partial def evalExpr (e : Expr) : InterpM Value := do
   match e with
   | .name n _ => lookupVariable n
@@ -692,7 +713,7 @@ partial def evalExpr (e : Expr) : InterpM Value := do
     return .none
   | .yieldFrom iterExpr _ => do
     let iterVal ← evalExpr iterExpr
-    let items ← iterValues iterVal
+    let items ← iterValuesExt iterVal
     let st ← get
     match st.yieldAccumulator with
     | some acc => set { st with yieldAccumulator := some (acc ++ items) }
@@ -706,7 +727,7 @@ partial def evalArgList (args : List Expr) : InterpM (List Value) := do
     match arg with
     | .starred inner _ => do
       let v ← evalExpr inner
-      let items ← iterValues v
+      let items ← iterValuesExt v
       result := result ++ items.toList
     | _ => result := result ++ [← evalExpr arg]
   return result
@@ -746,10 +767,10 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         | [] => pure (Value.none, #[])
         | [f] => pure (f, #[])
         | [f, init] => do
-          let items ← iterValues init
+          let items ← iterValuesExt init
           let mut pairs : Array (Value × Value) := #[]
           for item in items do
-            let kv ← iterValues item
+            let kv ← iterValuesExt item
             if kv.size >= 2 then pairs := pairs.push (kv[0]!, kv[1]!)
           pure (f, pairs)
         | _ => throwTypeError "defaultdict() takes at most 2 positional arguments"
@@ -771,7 +792,7 @@ partial def callValueDispatch (callee : Value) (args : List Value)
       match args with
       | [] => allocList #[]
       | [iter] => do
-        let items ← iterValues iter
+        let items ← iterValuesExt iter
         allocList items
       | _ => throwTypeError "deque() takes at most 1 argument"
     | "operator.itemgetter" => do
@@ -2141,7 +2162,7 @@ partial def evalCompGen (generators : List Comprehension)
   match generators with
   | [] => return acc.push (← body)
   | gen :: rest => do
-    let items ← iterValues (← evalExpr gen.iter)
+    let items ← iterValuesExt (← evalExpr gen.iter)
     let mut result := acc
     for item in items do
       assignToTarget gen.target item
@@ -2157,7 +2178,7 @@ partial def evalDictCompGen (generators : List Comprehension)
   match generators with
   | [] => return acc.push (← body)
   | gen :: rest => do
-    let items ← iterValues (← evalExpr gen.iter)
+    let items ← iterValuesExt (← evalExpr gen.iter)
     let mut result := acc
     for item in items do
       assignToTarget gen.target item
@@ -2514,6 +2535,13 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
     match ← callDunder obj "__getitem__" [idx] with
     | some v => return v
     | none => throwTypeError s!"'{typeName obj}' object is not subscriptable"
+  | .none => return .none  -- typing stubs: ClassVar[int], Generic[T], IO[bytes] etc.
+  | .classObj cref => do
+    -- __class_getitem__ support: SomeClass[T] calls cls.__class_getitem__(T)
+    let cd ← heapGetClassData cref
+    match cd.ns["__class_getitem__"]? with
+    | some fn => callValueDispatch fn [idx] []
+    | none => return .none  -- default: subscripting a class returns .none (for typing)
   | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
 
 -- Assignment target resolution
@@ -2525,7 +2553,7 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
     let idxVal ← evalExpr idx
     assignSubscriptValue objVal idxVal value
   | .tuple targets _ | .list_ targets _ => do
-    let items ← iterValues value
+    let items ← iterValuesExt value
     -- Check for starred
     let starIdx := targets.findIdx? fun
       | .starred _ _ => true
@@ -2695,9 +2723,11 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
               "TypeAlias", "Literal", "IO", "Sequence", "Mapping",
               "Iterator", "Iterable", "Generator", "Coroutine",
               "Awaitable", "AsyncIterator", "AsyncGenerator",
-              "Type", "Generic", "TypeVar", "Annotated",
+              "Type", "Generic", "Annotated",
               "overload", "cast", "no_type_check"] do
       ns := ns.insert n .none
+    -- TypeVar is callable (returns .none as a stub type variable)
+    ns := ns.insert "TypeVar" (.builtin "typing.TypeVar")
     -- override is a callable identity decorator (not .none)
     ns := ns.insert "override" (.builtin "typing.override")
     some <$> mkMod ns
@@ -3279,7 +3309,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     if !brokeOut then execStmts orelse
 
   | .for_ target iter body orelse _ => do
-    let items ← iterValues (← evalExpr iter)
+    let items ← iterValuesExt (← evalExpr iter)
     let mut brokeOut := false
     for item in items do
       assignToTarget target item
@@ -3724,7 +3754,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
             throwImportError s!"cannot import name '{alias.name}' from '{fqName}'"
 
   | .asyncFor target iter body orelse _ => do
-    let items ← iterValues (← evalExpr iter)
+    let items ← iterValuesExt (← evalExpr iter)
     let mut brokeOut := false
     for item in items do
       assignToTarget target item
@@ -3975,7 +4005,7 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
 partial def builtinMap (args : List Value) : InterpM Value := do
   match args with
   | [func, iter] => do
-    let items ← iterValues iter
+    let items ← iterValuesExt iter
     let mut result : Array Value := #[]
     for item in items do
       let v ← callValueDispatch func [item] []
@@ -3986,7 +4016,7 @@ partial def builtinMap (args : List Value) : InterpM Value := do
 partial def builtinFilter (args : List Value) : InterpM Value := do
   match args with
   | [func, iter] => do
-    let items ← iterValues iter
+    let items ← iterValuesExt iter
     let mut result : Array Value := #[]
     for item in items do
       let keep ← match func with
@@ -4042,14 +4072,14 @@ partial def isBaseModelSubclass (bases : Array Value) : InterpM Bool := do
 partial def builtinFunctoolsReduce (args : List Value) : InterpM Value := do
   match args with
   | [func, iter] => do
-    let items ← iterValues iter
+    let items ← iterValuesExt iter
     if items.isEmpty then throwTypeError "reduce() of empty iterable with no initial value"
     let mut acc := items[0]!
     for i in [1:items.size] do
       acc ← callValueDispatch func [acc, items[i]!] []
     return acc
   | [func, iter, initial] => do
-    let items ← iterValues iter
+    let items ← iterValuesExt iter
     let mut acc := initial
     for item in items do
       acc ← callValueDispatch func [acc, item] []
@@ -4070,7 +4100,7 @@ partial def builtinItertoolsAccumulate (args : List Value)
     | some (_, f) => some f
     | none => func
   let initial := kwargs.find? (fun p => p.1 == "initial") |>.map (·.2)
-  let items ← iterValues iter
+  let items ← iterValuesExt iter
   let mut result : Array Value := #[]
   let mut acc : Value := match initial with
     | some v => v
@@ -4295,7 +4325,7 @@ partial def callListMethod (ref : HeapRef) (method : String) (args : List Value)
   | "extend" =>
     match args with
     | [v] => do
-      let items ← iterValues v
+      let items ← iterValuesExt v
       heapSetList ref ((← heapGetList ref) ++ items); return .none
     | _ => throwTypeError "extend() takes exactly one argument"
   | "pop" => do
@@ -4470,7 +4500,7 @@ partial def callStrMethod (s : String) (method : String) (args : List Value)
   | "join" =>
     match args with
     | [iter] => do
-      let items ← iterValues iter
+      let items ← iterValuesExt iter
       let strs ← items.toList.mapM fun v =>
         match v with
         | .str sub => pure sub
@@ -4677,7 +4707,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       let mut result := a
       for elem in b do
         let mut found := false
@@ -4690,7 +4720,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       let mut result : Array Value := #[]
       for elem in a do
         let mut found := false
@@ -4703,7 +4733,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       let mut result : Array Value := #[]
       for elem in a do
         let mut found := false
@@ -4716,7 +4746,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       let mut result : Array Value := #[]
       for elem in a do
         let mut found := false
@@ -4734,7 +4764,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       for elem in a do
         let mut found := false
         for otherElem in b do
@@ -4746,7 +4776,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       for elem in b do
         let mut found := false
         for otherElem in a do
@@ -4758,7 +4788,7 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
     match args with
     | [other] => do
       let a ← heapGetSet ref
-      let b ← iterValues other
+      let b ← iterValuesExt other
       for elem in a do
         for otherElem in b do
           if ← valueEq elem otherElem then return .bool false
@@ -5127,10 +5157,50 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
   nsUpdated := nsUpdated.insert "__pydantic_field_serializers__" (.list fsRef)
   nsUpdated := nsUpdated.insert "__pydantic_model_serializers__" (.list msRef)
   -- 6. Build model_fields dict: {field_name: {"annotation": ..., "default": ...}}
+  -- First, collect all raw annotations (own + inherited) for actual type values
+  let ownRawAnns ← match cd.ns["__annotations_raw__"]? with
+    | some (.dict ref) => heapGetDict ref
+    | _ => pure #[]
+  let mut allRawAnns : Array (Value × Value) := #[]
+  -- Collect inherited raw annotations from parent classes
+  for mroEntry in cd.mro do
+    match mroEntry with
+    | .classObj mref => do
+      if mref == cref then continue
+      let mcd ← heapGetClassData mref
+      if mcd.name == "BaseModel" then continue
+      if mcd.ns["__pydantic_model__"]? != some (.bool true) then continue
+      match mcd.ns["__annotations_raw__"]? with
+      | some (.dict ref) => do
+        let pairs ← heapGetDict ref
+        for (k, v) in pairs do
+          -- Only add if not already present (child overrides parent)
+          if !(allRawAnns.any fun (ek, _) => Value.beq ek k) then
+            allRawAnns := allRawAnns.push (k, v)
+      | _ => pure ()
+    | _ => pure ()
+  -- Add own raw annotations (override inherited)
+  for (k, v) in ownRawAnns do
+    let mut found := false
+    for i in [:allRawAnns.size] do
+      if Value.beq allRawAnns[i]!.1 k then
+        allRawAnns := allRawAnns.set! i (k, v)
+        found := true
+        break
+    if !found then allRawAnns := allRawAnns.push (k, v)
+  -- Build the model_fields dict using actual types from raw annotations
   let mut mfPairs : Array (Value × Value) := #[]
   for (name, defVal) in allFields do
     let mut infoPairs : Array (Value × Value) := #[]
-    infoPairs := infoPairs.push (.str "annotation", .str "Any")
+    -- Look up actual type from raw annotations
+    let annVal ← do
+      let mut found : Value := .str "Any"
+      for (k, v) in allRawAnns do
+        if Value.beq k (.str name) then
+          found := v
+          break
+      pure found
+    infoPairs := infoPairs.push (.str "annotation", annVal)
     match defVal with
     | some v => infoPairs := infoPairs.push (.str "default", v)
     | none => pure ()
@@ -5140,9 +5210,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
   nsUpdated := nsUpdated.insert "model_fields" mfDict
   -- 6b. Build __get_pydantic_core_schema__ field schema map
   -- For each field, check if the annotation type has __get_pydantic_core_schema__
-  let rawAnns ← match cd.ns["__annotations_raw__"]? with
-    | some (.dict ref) => heapGetDict ref
-    | _ => pure #[]
+  let rawAnns := allRawAnns
   let mut fieldSchemaPairs : Array (Value × Value) := #[]
   for (nameV, typeV) in rawAnns do
     match nameV with

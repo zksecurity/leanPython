@@ -367,6 +367,13 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
         | "set" => tn == "set"
         | "bytes" => tn == "bytes"
         | "bytearray" => tn == "bytearray"
+        | "type" =>
+          -- classObj values are types, and builtin type names (int, str, etc.) are types
+          tn == "type" || match obj with
+            | .builtin n => ["int", "float", "str", "bool", "list", "tuple", "dict",
+                             "set", "bytes", "bytearray", "type", "object",
+                             "frozenset", "memoryview", "complex"].contains n
+            | _ => false
         | _ => false
       if isMatch then return .bool true
       -- For instances, check if any class in MRO is the synthetic built-in type
@@ -937,6 +944,9 @@ partial def callBuiltin (name : String) (args : List Value)
     match args with
     | [f] => return f
     | _ => throwTypeError "override() takes exactly 1 argument"
+  | "typing.TypeVar" => do
+    -- TypeVar('T', bound=SomeType) — stub that returns .none
+    return .none
   -- ============================================================
   -- dataclasses module functions
   -- ============================================================
