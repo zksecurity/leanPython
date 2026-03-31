@@ -929,9 +929,11 @@ partial def callBuiltin (name : String) (args : List Value)
     | [cls] => return cls
     | _ => throwTypeError "functools.total_ordering() takes exactly 1 argument"
   | "functools.singledispatch" => do
-    -- Stub: just return the function
+    -- Create a dispatch registry dict and return a parameterized builtin
     match args with
-    | [f] => return f
+    | [f] => do
+      let regRef ← heapAlloc (.dictObj #[(.str "__default__", f)])
+      return .builtin s!"functools.singledispatch:{regRef}"
     | _ => throwTypeError "functools.singledispatch() takes exactly 1 argument"
   -- ============================================================
   -- abc module functions

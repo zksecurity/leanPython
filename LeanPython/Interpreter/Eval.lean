@@ -1818,6 +1818,94 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
           | _ => throwTypeError "bytes.decode takes at most 1 argument"
         | _ => throwTypeError s!"bytes.{methodName} is not implemented"
+      -- ============================================================
+      -- functools.singledispatch dispatch and register
+      -- ============================================================
+      else if name.startsWith "functools.singledispatch:" then do
+        -- Dispatch: look up type of first arg in registry
+        let refStr := String.ofList (name.toList.drop "functools.singledispatch:".length)
+        let regRef := refStr.toNat!
+        let registry ← heapGetDict regRef
+        -- Get type name of first argument for dispatch
+        let dispatchTypeName ← match args.head? with
+          | some (.instance iref) => do
+            let id_ ← heapGetInstanceData iref
+            match id_.cls with
+            | .classObj cref => do
+              let cd ← heapGetClassData cref
+              -- Check MRO for registered types
+              let mut found : Option Value := none
+              for mroEntry in cd.mro do
+                match mroEntry with
+                | .classObj mref => do
+                  let mcd ← heapGetClassData mref
+                  for (k, v) in registry do
+                    match k with
+                    | .str s => if s == mcd.name then found := some v
+                    | _ => pure ()
+                | _ => pure ()
+              match found with
+              | some fn => return ← callValueDispatch fn args kwargs
+              | none => pure cd.name
+            | _ => pure "instance"
+          | some (.int _) => pure "int"
+          | some (.bool _) => pure "bool"
+          | some (.str _) => pure "str"
+          | some (.bytes _) => pure "bytes"
+          | some (.float _) => pure "float"
+          | some (.none) => pure "NoneType"
+          | _ => pure "__unknown__"
+        -- Look up in registry by exact type name
+        let mut targetFn : Option Value := none
+        for (k, v) in registry do
+          match k with
+          | .str s =>
+            if s == dispatchTypeName then targetFn := some v
+          | _ => pure ()
+        match targetFn with
+        | some fn => callValueDispatch fn args kwargs
+        | none =>
+          -- Fallback to __default__
+          let mut defaultFn : Option Value := none
+          for (k, v) in registry do
+            match k with
+            | .str s => if s == "__default__" then defaultFn := some v
+            | _ => pure ()
+          match defaultFn with
+          | some fn => callValueDispatch fn args kwargs
+          | none => throwTypeError s!"singledispatch: no handler for type '{dispatchTypeName}'"
+      else if name.startsWith "functools.singledispatch_register:" then do
+        -- Register decorator: called as @dispatch.register with func as arg
+        -- The func's first param type annotation tells us which type to register for
+        let refStr := String.ofList (name.toList.drop "functools.singledispatch_register:".length)
+        let regRef := refStr.toNat!
+        let registry ← heapGetDict regRef
+        match args with
+        | [fn] => do
+          -- Extract the type name from the function's first parameter annotation
+          let typeName ← match fn with
+            | .function fref => do
+              let fd ← heapGetFunc fref
+              -- Look at the first param (not self) annotation
+              match fd.params.args.head? with
+              | some arg =>
+                match arg.annotation with
+                | some annExpr => do
+                  let annVal ← evalExpr annExpr
+                  match annVal with
+                  | .classObj cref => do
+                    let cd ← heapGetClassData cref
+                    pure cd.name
+                  | .builtin bname => pure bname
+                  | _ => pure "__unknown__"
+                | none => pure "__unknown__"
+              | none => pure "__unknown__"
+            | _ => pure "__unknown__"
+          -- Add to registry
+          let newRegistry := registry.push (.str typeName, fn)
+          heapSetDict regRef newRegistry
+          return fn
+        | _ => throwTypeError "singledispatch.register() takes exactly one argument"
       else
         callBuiltin name args kwargs
   | .function ref => do
@@ -2245,7 +2333,13 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     -- datetime.datetime.now — class method
     | "datetime.datetime", "now" => return .builtin "datetime.datetime.now"
     | "datetime.datetime", "fromtimestamp" => return .builtin "datetime.datetime.fromtimestamp"
-    | _, _ => throwAttributeError s!"type '{name}' has no attribute '{attr}'"
+    | _, _ =>
+      -- Check for singledispatch .register attribute
+      if name.startsWith "functools.singledispatch:" && attr == "register" then
+        let refStr := String.ofList (name.toList.drop "functools.singledispatch:".length)
+        return .builtin s!"functools.singledispatch_register:{refStr}"
+      else
+        throwAttributeError s!"type '{name}' has no attribute '{attr}'"
   | .exception _ _ =>
     match attr with
     | "args" => return .str (Value.toStr obj)
@@ -2530,6 +2624,13 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
       let ni := normalizeIndex i b.size
       if ni < 0 || ni >= b.size then throwIndexError "index out of range"
       return .int b[ni.toNat]!.toNat
+    | .tuple #[start, stop, step] => do
+      let (st, en, stp) ← computeSliceIndices b.size (some start) (some stop) (some step)
+      let indices := sliceIndices st en stp
+      let mut result := ByteArray.empty
+      for i in indices do
+        if i < b.size then result := result.push b[i]!
+      return .bytes result
     | _ => throwTypeError "bytes indices must be integers"
   | .instance _ => do
     match ← callDunder obj "__getitem__" [idx] with
