@@ -21,22 +21,30 @@ private def floatCompare (a b : Float) : Ordering :=
 -- Int bitwise helpers (Lean4 has bitwise on Nat, not Int directly)
 -- ============================================================
 
+-- Helper: a AND (NOT b) for Nat = a with b's bits cleared
+private def natAndNot (a b : Nat) : Nat := a.xor (a.land b)
+
+-- Two's complement bitwise: .negSucc m represents -(m+1) = bitwise NOT of m
 private def intBitOr (a b : Int) : Int :=
-  -- Simple implementation for non-negative; for negative use two's complement
-  -- For now, cast through Nat for positive values
   match a, b with
-  | .ofNat m, .ofNat n => .ofNat (m.lor n)
-  | _, _ => a  -- TODO: handle negative int bitwise properly
+  | .ofNat m, .ofNat n     => .ofNat (m.lor n)
+  | .negSucc m, .ofNat n   => .negSucc (natAndNot m n)
+  | .ofNat m, .negSucc n   => .negSucc (natAndNot n m)
+  | .negSucc m, .negSucc n => .negSucc (m.land n)
 
 private def intBitAnd (a b : Int) : Int :=
   match a, b with
-  | .ofNat m, .ofNat n => .ofNat (m.land n)
-  | _, _ => 0
+  | .ofNat m, .ofNat n     => .ofNat (m.land n)
+  | .negSucc m, .ofNat n   => .ofNat (natAndNot n m)
+  | .ofNat m, .negSucc n   => .ofNat (natAndNot m n)
+  | .negSucc m, .negSucc n => .negSucc (m.lor n)
 
 private def intBitXor (a b : Int) : Int :=
   match a, b with
-  | .ofNat m, .ofNat n => .ofNat (m.xor n)
-  | _, _ => 0
+  | .ofNat m, .ofNat n     => .ofNat (m.xor n)
+  | .negSucc m, .ofNat n   => .negSucc (m.xor n)
+  | .ofNat m, .negSucc n   => .negSucc (m.xor n)
+  | .negSucc m, .negSucc n => .ofNat (m.xor n)
 
 private def intBitNot (a : Int) : Int :=
   -(a + 1)

@@ -310,6 +310,10 @@ partial def parseExprOrAssign : ParserM Stmt := do
       if (← isNewline) || (← isEndmarker) || (← isDelimiter .semi) then break
       items := items ++ [← parseTestListStarExprItem]
     let tupleExpr := Expr.tuple items (← spanFrom start)
+    if ← isOperator .equal then
+      discard advance
+      let val ← parseExpressionList
+      return .assign [tupleExpr] val (← spanFrom start)
     return .expr tupleExpr (← spanFrom start)
   return .expr lhs (← spanFrom start)
 

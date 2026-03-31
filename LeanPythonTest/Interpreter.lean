@@ -40,6 +40,24 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 #eval assertPy "print(-5)\n" "-5\n"
 #eval assertPy "print(+5)\n" "5\n"
 
+-- Bitwise operations (non-negative)
+#eval assertPy "print(0b1100 & 0b1010)" "8\n"
+#eval assertPy "print(0b1100 | 0b1010)" "14\n"
+#eval assertPy "print(0b1100 ^ 0b1010)" "6\n"
+#eval assertPy "print(~0)" "-1\n"
+#eval assertPy "print(1 << 10)" "1024\n"
+#eval assertPy "print(1024 >> 2)" "256\n"
+
+-- Bitwise operations (negative integers, two's complement)
+#eval assertPy "print(-1 & 0xFF)" "255\n"
+#eval assertPy "print(-2 | 1)" "-1\n"
+#eval assertPy "print(-1 ^ 0)" "-1\n"
+#eval assertPy "print(-3 & 6)" "4\n"
+#eval assertPy "print(-1 & -2)" "-2\n"
+#eval assertPy "print(-1 | -2)" "-1\n"
+#eval assertPy "print(-1 ^ -1)" "0\n"
+#eval assertPy "print(-5 ^ 3)" "-8\n"
+
 -- ============================================================
 -- Float arithmetic
 -- ============================================================
@@ -154,8 +172,14 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 #eval assertPy "t = (1, 2, 3)\nprint(t)\n" "(1, 2, 3)\n"
 #eval assertPy "print((1,))\n" "(1,)\n"
--- Tuple unpacking: a, b = 1, 2 - requires parser support for starred assignment
--- Skipped for now
+-- Tuple unpacking at statement level
+#eval assertPy "a, b = 1, 2\nprint(a)\nprint(b)" "1\n2\n"
+#eval assertPy "a, b = (10, 20)\nprint(a)\nprint(b)" "10\n20\n"
+#eval assertPy "a, b, c = [1, 2, 3]\nprint(a)\nprint(b)\nprint(c)" "1\n2\n3\n"
+#eval assertPy "a, *b = [1, 2, 3, 4]\nprint(a)\nprint(b)" "1\n[2, 3, 4]\n"
+#eval assertPy "a = 1\nb = 2\na, b = b, a\nprint(a)\nprint(b)" "2\n1\n"
+#eval assertPy "def f():\n    return 1, 2\nx, y = f()\nprint(x)\nprint(y)" "1\n2\n"
+#eval assertPy "w, v = 4, 4\nprint(w)\nprint(v)" "4\n4\n"
 
 -- ============================================================
 -- Dicts

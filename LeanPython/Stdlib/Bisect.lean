@@ -68,7 +68,20 @@ partial def bisectLeft (args : List Value) (kwargs : List (String × Value))
         | _ => arr.size
     let result ← bisectLeftCore arr x lo hi
     return .int result
-  | _ => throwTypeError "bisect_left() requires a list and a value"
+  | .tuple arr :: x :: rest => do
+    let lo := match rest with
+      | .int n :: _ => n.toNat
+      | _ => match kwargs.find? (fun p => p.1 == "lo") with
+        | some (_, .int n) => n.toNat
+        | _ => 0
+    let hi := match rest with
+      | _ :: .int n :: _ => n.toNat
+      | _ => match kwargs.find? (fun p => p.1 == "hi") with
+        | some (_, .int n) => n.toNat
+        | _ => arr.size
+    let result ← bisectLeftCore arr x lo hi
+    return .int result
+  | _ => throwTypeError "bisect_left() requires a list or tuple and a value"
 
 -- ============================================================
 -- bisect_right
@@ -92,7 +105,20 @@ partial def bisectRight (args : List Value) (kwargs : List (String × Value))
         | _ => arr.size
     let result ← bisectRightCore arr x lo hi
     return .int result
-  | _ => throwTypeError "bisect_right() requires a list and a value"
+  | .tuple arr :: x :: rest => do
+    let lo := match rest with
+      | .int n :: _ => n.toNat
+      | _ => match kwargs.find? (fun p => p.1 == "lo") with
+        | some (_, .int n) => n.toNat
+        | _ => 0
+    let hi := match rest with
+      | _ :: .int n :: _ => n.toNat
+      | _ => match kwargs.find? (fun p => p.1 == "hi") with
+        | some (_, .int n) => n.toNat
+        | _ => arr.size
+    let result ← bisectRightCore arr x lo hi
+    return .int result
+  | _ => throwTypeError "bisect_right() requires a list or tuple and a value"
 
 -- ============================================================
 -- insort

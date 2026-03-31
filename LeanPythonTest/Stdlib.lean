@@ -302,6 +302,13 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 #eval assertPy "import bisect\na = [1, 3, 5]\nbisect.insort(a, 0)\nprint(a)" "[0, 1, 3, 5]\n"
 #eval assertPy "import bisect\na = [1, 3, 5]\nbisect.insort(a, 6)\nprint(a)" "[1, 3, 5, 6]\n"
 
+-- bisect_left with tuple
+#eval assertPy "import bisect\nprint(bisect.bisect_left((1, 3, 5, 7), 4))" "2\n"
+#eval assertPy "import bisect\nprint(bisect.bisect_left((1, 3, 5, 7), 5))" "2\n"
+
+-- bisect_right with tuple
+#eval assertPy "import bisect\nprint(bisect.bisect_right((1, 3, 5, 7), 5))" "3\n"
+
 -- from bisect import
 #eval assertPy "from bisect import bisect_left, insort\na = [10, 20, 30]\nprint(bisect_left(a, 25))\ninsort(a, 25)\nprint(a)" "2\n[10, 20, 25, 30]\n"
 
