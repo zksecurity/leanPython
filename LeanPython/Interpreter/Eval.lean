@@ -3975,6 +3975,61 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
 
   | .asyncWith _items _body _ => throwNotImplemented "async with"
 
+  | .match_ subject cases _ => do
+    let subjectVal ← evalExpr subject
+    for mc in cases do
+      match ← tryMatchPattern mc.pattern subjectVal with
+      | some bindings =>
+        -- Check guard if present
+        let guardOk ← match mc.guard with
+          | some guardExpr => do
+            for (n, v) in bindings do setVariable n v
+            isTruthy (← evalExpr guardExpr)
+          | none => pure true
+        if guardOk then
+          for (n, v) in bindings do setVariable n v
+          execStmts mc.body
+          return
+      | none => pure ()
+
+-- Try to match a pattern against a value.
+-- Returns `some bindings` on success, `none` on failure.
+partial def tryMatchPattern (pat : MatchPattern) (val : Value) : InterpM (Option (List (String × Value))) := do
+  match pat with
+  | .matchWildcard => return some []
+  | .matchCapture name none => return some [(name, val)]
+  | .matchCapture name (some inner) =>
+    match ← tryMatchPattern inner val with
+    | some bindings => return some ((name, val) :: bindings)
+    | none => return none
+  | .matchValue expr => do
+    let expected ← evalExpr expr
+    let eq ← evalCmpOp .eq val expected
+    if eq then return some [] else return none
+  | .matchClass clsExpr kwNames kwPats => do
+    let clsVal ← evalExpr clsExpr
+    -- Check isinstance
+    let isInst ← match val with
+      | .instance instRef => isInstanceOfClass instRef clsVal
+      | _ => pure false
+    if !isInst then return none
+    -- Match keyword patterns against attributes
+    let mut allBindings : List (String × Value) := []
+    for i in [:kwNames.length] do
+      let attrName := kwNames[i]!
+      let attrPat := kwPats[i]!
+      let attrVal ← getAttributeValue val attrName
+      match ← tryMatchPattern attrPat attrVal with
+      | some bindings => allBindings := allBindings ++ bindings
+      | none => return none
+    return some allBindings
+  | .matchOr pats => do
+    for p in pats do
+      match ← tryMatchPattern p val with
+      | some bindings => return some bindings
+      | none => pure ()
+    return none
+
 partial def deleteSubscriptValue (obj idx : Value) : InterpM Unit := do
   match obj with
   | .list ref =>

@@ -118,6 +118,20 @@ instance : Inhabited CallKeyword where
 instance : Inhabited Comprehension where
   default := .mk default default [] false
 
+/-! ## Match patterns (reference `Expr` but not `Stmt`) -/
+
+-- MatchPattern is self-recursive and references Expr but does not need
+-- to be in the Expr mutual block since Expr does not reference it back.
+inductive MatchPattern where
+  | matchValue    : Expr → MatchPattern
+  | matchClass    : Expr → List String → List MatchPattern → MatchPattern
+  | matchWildcard : MatchPattern
+  | matchCapture  : String → Option MatchPattern → MatchPattern
+  | matchOr       : List MatchPattern → MatchPattern
+
+instance : Inhabited MatchPattern where
+  default := .matchWildcard
+
 /-! ## Standalone types (reference `Expr` only, not `Stmt`) -/
 
 /-- Import alias: `name [as asName]`. -/
@@ -167,6 +181,12 @@ inductive Stmt where
   | continue_      : SourceSpan → Stmt
   | asyncFor       : Expr → Expr → List Stmt → List Stmt → SourceSpan → Stmt
   | asyncWith      : List WithItem → List Stmt → SourceSpan → Stmt
+  | match_         : Expr → List MatchCase → SourceSpan → Stmt
+
+/-- A single `case` clause in a `match` statement. -/
+inductive MatchCase where
+  | mk : (pattern : MatchPattern) → (guard : Option Expr) →
+         (body : List Stmt) → (span : SourceSpan) → MatchCase
 
 /-- An `except` clause in a `try` statement. -/
 inductive ExceptHandler where
@@ -223,6 +243,13 @@ def name : CallKeyword → Option String | .mk n _ _ => n
 def value : CallKeyword → Expr | .mk _ v _ => v
 def span : CallKeyword → SourceSpan | .mk _ _ s => s
 end CallKeyword
+
+namespace MatchCase
+def pattern : MatchCase → MatchPattern | .mk p _ _ _ => p
+def guard : MatchCase → Option Expr | .mk _ g _ _ => g
+def body : MatchCase → List Stmt | .mk _ _ b _ => b
+def span : MatchCase → SourceSpan | .mk _ _ _ s => s
+end MatchCase
 
 namespace ExceptHandler
 def type_ : ExceptHandler → Option Expr | .mk t _ _ _ => t
@@ -352,6 +379,17 @@ partial def dumpStmt : Stmt → String
   | .continue_ _           => "Continue"
   | .asyncFor t i b e _    => s!"AsyncFor({dumpExpr t}, {dumpExpr i}, {dumpList dumpStmt b}, {dumpList dumpStmt e})"
   | .asyncWith is_ b _     => s!"AsyncWith({dumpList dumpWithItem is_}, {dumpList dumpStmt b})"
+  | .match_ s cs _         => s!"Match({dumpExpr s}, {dumpList dumpMatchCase cs})"
+
+partial def dumpMatchPattern : MatchPattern → String
+  | .matchValue e          => s!"MatchValue({dumpExpr e})"
+  | .matchClass c ns ps    => s!"MatchClass({dumpExpr c}, {dumpList id ns}, {dumpList dumpMatchPattern ps})"
+  | .matchWildcard         => "MatchWildcard"
+  | .matchCapture n p      => s!"MatchCapture({n}, {dumpOpt dumpMatchPattern p})"
+  | .matchOr ps            => s!"MatchOr({dumpList dumpMatchPattern ps})"
+
+partial def dumpMatchCase : MatchCase → String
+  | .mk p g b _ => s!"Case({dumpMatchPattern p}, {dumpOpt dumpExpr g}, {dumpList dumpStmt b})"
 
 partial def dumpComp : Comprehension → String
   | .mk t i ifs_ a => s!"Comp({dumpExpr t}, {dumpExpr i}, {dumpList dumpExpr ifs_}, {a})"
@@ -451,6 +489,8 @@ partial def stmtContainsYield : Stmt → Bool
   | .import_ _ _ | .importFrom _ _ _ _ => false
   | .asyncFor _ i b e _ => exprContainsYield i || stmtsContainYield b || stmtsContainYield e
   | .asyncWith _ b _ => stmtsContainYield b
+  | .match_ e cs _ =>
+    exprContainsYield e || cs.any fun c => stmtsContainYield c.body
 
 partial def compContainsYield : Comprehension → Bool
   | .mk t i ifs_ _ =>

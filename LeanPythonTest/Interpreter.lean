@@ -613,3 +613,40 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- @dataclass with partial defaults
 #eval assertPy "@dataclass\nclass Config:\n    x: int\n    y: int = 99\nc = Config(1)\nprint(c.x)\nprint(c.y)\n" "1\n99\n"
+
+-- ============================================================
+-- Match/Case (structural pattern matching)
+-- ============================================================
+
+-- Wildcard pattern
+#eval assertPy "x = 42\nmatch x:\n    case _:\n        print('matched')\n" "matched\n"
+
+-- Value pattern with literal
+#eval assertPy "x = 2\nmatch x:\n    case 1:\n        print('one')\n    case 2:\n        print('two')\n    case 3:\n        print('three')\n" "two\n"
+
+-- Capture pattern
+#eval assertPy "x = 99\nmatch x:\n    case val:\n        print(val)\n" "99\n"
+
+-- No match — execution continues without error
+#eval assertPy "x = 5\nmatch x:\n    case 1:\n        print('one')\n    case 2:\n        print('two')\nprint('done')\n" "done\n"
+
+-- Guard expression
+#eval assertPy "x = 10\nmatch x:\n    case val if val > 5:\n        print('big')\n    case val:\n        print('small')\n" "big\n"
+
+-- Guard fails, falls through to next case
+#eval assertPy "x = 3\nmatch x:\n    case val if val > 5:\n        print('big')\n    case val:\n        print('small')\n" "small\n"
+
+-- Class pattern with keyword capture
+#eval assertPy "class Point:\n    def __init__(self, x, y):\n        self.x = x\n        self.y = y\np = Point(3, 4)\nmatch p:\n    case Point(x=a, y=b):\n        print(a)\n        print(b)\n" "3\n4\n"
+
+-- Class pattern with no args (isinstance check only)
+#eval assertPy "class Foo:\n    pass\nclass Bar:\n    pass\nf = Foo()\nmatch f:\n    case Bar():\n        print('bar')\n    case Foo():\n        print('foo')\n" "foo\n"
+
+-- Value pattern with dotted name (enum-like)
+#eval assertPy "class Color:\n    RED = 1\n    GREEN = 2\n    BLUE = 3\nx = 2\nmatch x:\n    case Color.RED:\n        print('red')\n    case Color.GREEN:\n        print('green')\n    case Color.BLUE:\n        print('blue')\n" "green\n"
+
+-- Match with wildcard as default
+#eval assertPy "x = 'hello'\nmatch x:\n    case 'world':\n        print('world')\n    case _:\n        print('default')\n" "default\n"
+
+-- Match/case used as variable name (soft keyword)
+#eval assertPy "match = 5\nprint(match)\n" "5\n"

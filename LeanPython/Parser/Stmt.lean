@@ -7,7 +7,7 @@ namespace LeanPython.Parser
 
 open LeanPython.Lexer (SourceSpan Token TokenKind Keyword Operator Delimiter)
 open LeanPython.AST (Expr Stmt Alias WithItem ExceptHandler FunctionDef ClassDef
-                  Module BinOp Arguments Arg CallKeyword)
+                  Module BinOp Arguments Arg CallKeyword MatchPattern MatchCase)
 
 mutual
 
@@ -150,6 +150,10 @@ partial def parseStmtLine : ParserM (List Stmt) := do
   | some (.keyword .class_)    => return [← parseClassDef false]
   | some (.keyword .async)     => return [← parseAsync]
   | some (.operator .at)       => return [← parseDecorated]
+  | some (.name "match") =>
+    match ← attempt parseMatchStmt with
+    | some s => return [s]
+    | none => parseSimpleStmts
   | _ => parseSimpleStmts
 
 /-- Parse simple statements on one line, separated by `;`. -/
@@ -518,6 +522,110 @@ partial def parseDecorated : ParserM Stmt := do
       | some t => pure t
       | none   => throw (.unexpectedEOF "expected def or class after decorator")
     throw (.expectedToken "def or class" tok.kind tok.span.start)
+
+-- ## Match/case (structural pattern matching)
+
+/-- Parse a match pattern: wildcard, class, value, or capture. -/
+partial def parseMatchPattern : ParserM MatchPattern := do
+  match ← peekKind with
+  | some (.name "_") =>
+    discard advance
+    return .matchWildcard
+  | some (.name n) =>
+    discard advance
+    -- Build dotted name chain for value patterns like Enum.VAL
+    let mut expr := Expr.name n (← spanFrom (← currentSpan))
+    let start ← currentSpan
+    while (← isDelimiter .dot) do
+      discard advance
+      let (attr, _) ← parseName
+      expr := Expr.attribute expr attr (← spanFrom start)
+    -- Check if class pattern: Name(...) or Name.attr(...)
+    if ← isDelimiter .lpar then
+      discard advance
+      let cls := expr
+      let mut kwNames : List String := []
+      let mut kwPats : List MatchPattern := []
+      if !(← isDelimiter .rpar) then
+        -- Parse keyword patterns: name=pattern, name=pattern, ...
+        let mut first := true
+        while true do
+          if !first then
+            if ← isDelimiter .comma then discard advance else break
+          first := false
+          if ← isDelimiter .rpar then break
+          let (kwName, _) ← parseName
+          discard (expectOperator .equal)
+          let pat ← parseMatchPattern
+          kwNames := kwNames ++ [kwName]
+          kwPats := kwPats ++ [pat]
+      discard (expectDelimiter .rpar)
+      return .matchClass cls kwNames kwPats
+    -- Bare name — capture pattern
+    if !(← isDelimiter .dot) then
+      match expr with
+      | .name nm _ => return .matchCapture nm none
+      | _ => pure ()
+    -- Dotted name — value pattern
+    return .matchValue expr
+  | some (.integer _) | some (.float_ _) | some (.string _) =>
+    let e ← parseExpression
+    return .matchValue e
+  | some (.keyword .none_) =>
+    discard advance
+    let sp ← spanFrom (← currentSpan)
+    return .matchValue (.constant .none_ sp)
+  | some (.keyword .true_) =>
+    discard advance
+    let sp ← spanFrom (← currentSpan)
+    return .matchValue (.constant .true_ sp)
+  | some (.keyword .false_) =>
+    discard advance
+    let sp ← spanFrom (← currentSpan)
+    return .matchValue (.constant .false_ sp)
+  | _ =>
+    let tok ← match ← peek with
+      | some t => pure t
+      | none => throw (.unexpectedEOF "expected match pattern")
+    throw (.expectedToken "match pattern" tok.kind tok.span.start)
+
+/-- Parse a single `case pattern [if guard]: block`. -/
+partial def parseCaseClause : ParserM MatchCase := do
+  let start ← currentSpan
+  -- Expect the soft keyword `case`
+  match ← peekKind with
+  | some (.name "case") => discard advance
+  | _ =>
+    let tok ← match ← peek with
+      | some t => pure t
+      | none => throw (.unexpectedEOF "expected 'case'")
+    throw (.expectedToken "'case'" tok.kind tok.span.start)
+  let pat ← parseMatchPattern
+  let guard ← if ← isKeyword .if_ then do
+                 discard advance
+                 some <$> parseExpression
+               else pure none
+  discard (expectDelimiter .colon)
+  let body ← parseBlock
+  return MatchCase.mk pat guard body (← spanFrom start)
+
+/-- Parse `match subject: NEWLINE INDENT case+ DEDENT`. -/
+partial def parseMatchStmt : ParserM Stmt := do
+  let start ← currentSpan
+  -- Consume the soft keyword `match` (already verified as .name "match" by caller)
+  discard advance
+  let subject ← parseExpression
+  discard (expectDelimiter .colon)
+  discard expectNewline
+  discard expectIndent
+  let mut cases : List MatchCase := []
+  while true do
+    match ← peekKind with
+    | some (.name "case") => cases := cases ++ [← parseCaseClause]
+    | some .newline => discard advance
+    | _ => break
+  discard expectDedent
+  return .match_ subject cases (← spanFrom start)
 
 /-- Parse a module: statements until ENDMARKER. -/
 partial def parseModule : ParserM Module := do

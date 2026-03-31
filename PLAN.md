@@ -786,6 +786,7 @@ For non-deterministic tests, structural equivalence is checked.
 | 9d | leanSpec: state transition | Done (state_transition end-to-end with two-pass block building, state root validation, negative test for wrong state root) |
 | 9e | leanSpec: fork choice | Done (Store with block/state management, BlockLookup ancestors generator, LMD GHOST fork choice algorithm, compute_block_weights, update_head) |
 | 9f | leanSpec: cryptographic subspecs | Done (KoalaBear Fp field arithmetic with modular inverse/division, Poseidon2 width-16/24 permutation with reference test vectors, compression and sponge modes, int_to_base_p, SHAKE128-based PRF, tweak encoding, hash chain traversal with composition verification, hypercube layer size via math.comb + map_to_vertex round-trip, Merkle tree construction and path verification; interpreter: math.comb, os.urandom, list slice assignment, __bytes__ dunder) |
+| 9g | Match/case (structural pattern matching) | Done (MatchPattern AST with matchValue/matchClass/matchWildcard/matchCapture/matchOr, soft-keyword parser with attempt-based backtracking, interpreter pattern matching with isinstance + attribute extraction, class/value/wildcard/capture/guard patterns, real leanSpec XMSS encode_tweak test with match/case) |
 | 10 | Async runtime (optional) | Not started |
 
 ---
