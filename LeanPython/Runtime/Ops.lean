@@ -639,6 +639,7 @@ partial def evalCmpOp (op : CmpOp) (left right : Value) : InterpM Bool := do
       match left', right' with
       | .str a, .str b => return (a < b)
       | .bytes a, .bytes b => return (a.toList < b.toList)
+      | .tuple a, .tuple b => tupleLt a b
       | _, _ => throwTypeError s!"'<' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .ltE => do
     match ← numericCompare left' right' with
@@ -648,6 +649,11 @@ partial def evalCmpOp (op : CmpOp) (left right : Value) : InterpM Bool := do
       match left', right' with
       | .str a, .str b => return (decide (a ≤ b))
       | .bytes a, .bytes b => return (a.toList < b.toList || a == b)
+      | .tuple a, .tuple b => do
+        let lt ← tupleLt a b
+        if lt then return true
+        let gt ← tupleLt b a
+        return !gt
       | _, _ => throwTypeError s!"'<=' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .gt => do
     match ← numericCompare left' right' with
@@ -657,6 +663,7 @@ partial def evalCmpOp (op : CmpOp) (left right : Value) : InterpM Bool := do
       match left', right' with
       | .str a, .str b => return (decide (a > b))
       | .bytes a, .bytes b => return (b.toList < a.toList)
+      | .tuple a, .tuple b => tupleLt b a
       | _, _ => throwTypeError s!"'>' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .gtE => do
     match ← numericCompare left' right' with
@@ -666,11 +673,25 @@ partial def evalCmpOp (op : CmpOp) (left right : Value) : InterpM Bool := do
       match left', right' with
       | .str a, .str b => return (decide (a ≥ b))
       | .bytes a, .bytes b => return (b.toList < a.toList || a == b)
+      | .tuple a, .tuple b => do
+        let lt ← tupleLt b a
+        if lt then return true
+        let gt ← tupleLt a b
+        return !gt
       | _, _ => throwTypeError s!"'>=' not supported between instances of '{typeName left}' and '{typeName right}'"
   | .is_ => return (isIdentical left right)
   | .isNot => return (!isIdentical left right)
   | .in_ => valueContains right left
   | .notIn => do return !(← valueContains right left)
+where
+  /-- Lexicographic less-than for tuples. -/
+  tupleLt (a b : Array Value) : InterpM Bool := do
+    let minLen := min a.size b.size
+    for i in [:minLen] do
+      let eq ← valueEq a[i]! b[i]!
+      if !eq then
+        return ← evalCmpOp .lt a[i]! b[i]!
+    return (a.size < b.size)
 
 -- ============================================================
 -- Bool operators (short-circuit)

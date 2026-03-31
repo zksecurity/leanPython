@@ -20,7 +20,7 @@ open LeanPython.Stdlib.Hmac
 open LeanPython.Stdlib.Secrets
 open LeanPython.Stdlib.Sys
 open LeanPython.Stdlib.Os
-open LeanPython.Stdlib.Time (timeTime timeMonotonic timeSleep)
+open LeanPython.Stdlib.Time (timeTime timeMonotonic timePerfCounter timeSleep)
 open LeanPython.Stdlib.Datetime
 open LeanPython.Stdlib.Pathlib
 open LeanPython.Stdlib.Logging
@@ -138,7 +138,7 @@ private def knownDictMethods : List String :=
   ["get", "keys", "values", "items", "pop", "update", "clear", "copy", "setdefault"]
 
 private def knownSetMethods : List String :=
-  ["add", "remove", "discard", "clear", "copy", "union", "intersection",
+  ["add", "remove", "discard", "clear", "copy", "update", "union", "intersection",
    "difference", "symmetric_difference", "issubset", "issuperset", "isdisjoint"]
 
 private def knownIntMethods : List String :=
@@ -759,6 +759,16 @@ partial def callValueDispatch (callee : Value) (args : List Value)
     match name with
     | "map" => builtinMap args
     | "filter" => builtinFilter args
+    | "min" => do
+      let keyKw := kwargs.find? (fun (k, _) => k == "key")
+      match keyKw with
+      | some (_, keyFn) => builtinMinWithKey args keyFn
+      | none => callBuiltin name args kwargs
+    | "max" => do
+      let keyKw := kwargs.find? (fun (k, _) => k == "key")
+      match keyKw with
+      | some (_, keyFn) => builtinMaxWithKey args keyFn
+      | none => callBuiltin name args kwargs
     | "functools.reduce" => builtinFunctoolsReduce args
     | "itertools.accumulate" => builtinItertoolsAccumulate args kwargs
     | "collections.defaultdict" => do
@@ -3135,9 +3145,10 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     some <$> mkMod ns
   | "time" =>
     let mut ns : Std.HashMap String Value := {}
-    ns := ns.insert "time"      (.builtin "time.time")
-    ns := ns.insert "monotonic" (.builtin "time.monotonic")
-    ns := ns.insert "sleep"     (.builtin "time.sleep")
+    ns := ns.insert "time"         (.builtin "time.time")
+    ns := ns.insert "monotonic"    (.builtin "time.monotonic")
+    ns := ns.insert "perf_counter" (.builtin "time.perf_counter")
+    ns := ns.insert "sleep"        (.builtin "time.sleep")
     some <$> mkMod ns
   | "datetime" =>
     let mut ns : Std.HashMap String Value := {}
@@ -4183,6 +4194,42 @@ partial def builtinFilter (args : List Value) : InterpM Value := do
   | _ => throwTypeError "filter() requires exactly two arguments"
 
 -- ============================================================
+-- min/max with key= (need callValueDispatch, so must be in mutual block)
+-- ============================================================
+
+partial def builtinMinWithKey (args : List Value) (keyFn : Value) : InterpM Value := do
+  let items : List Value ← match args with
+    | [v] => do let arr ← iterValuesExt v; pure arr.toList
+    | xs => pure xs
+  match items with
+  | [] => throwValueError "min() arg is an empty sequence"
+  | first :: rest => do
+    let mut best := first
+    let mut bestKey ← callValueDispatch keyFn [first] []
+    for v in rest do
+      let vKey ← callValueDispatch keyFn [v] []
+      if ← evalCmpOp .lt vKey bestKey then
+        best := v
+        bestKey := vKey
+    return best
+
+partial def builtinMaxWithKey (args : List Value) (keyFn : Value) : InterpM Value := do
+  let items : List Value ← match args with
+    | [v] => do let arr ← iterValuesExt v; pure arr.toList
+    | xs => pure xs
+  match items with
+  | [] => throwValueError "max() arg is an empty sequence"
+  | first :: rest => do
+    let mut best := first
+    let mut bestKey ← callValueDispatch keyFn [first] []
+    for v in rest do
+      let vKey ← callValueDispatch keyFn [v] []
+      if ← evalCmpOp .gt vKey bestKey then
+        best := v
+        bestKey := vKey
+    return best
+
+-- ============================================================
 -- Enum support: check if any base class is an Enum
 -- ============================================================
 
@@ -4891,6 +4938,18 @@ partial def callSetMethod (ref : HeapRef) (method : String) (args : List Value)
         if !found then result := result.push elem
       allocSet result
     | _ => throwTypeError "union() takes exactly one argument"
+  | "update" =>
+    match args with
+    | [other] => do
+      let mut arr ← heapGetSet ref
+      let b ← iterValuesExt other
+      for elem in b do
+        let mut found := false
+        for existing in arr do
+          if ← valueEq existing elem then found := true; break
+        if !found then arr := arr.push elem
+      heapSetSet ref arr; return .none
+    | _ => throwTypeError "update() takes exactly one argument"
   | "intersection" =>
     match args with
     | [other] => do

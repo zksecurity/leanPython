@@ -21,6 +21,11 @@ partial def timeMonotonic (_args : List Value) : InterpM Value := do
   let ms ← (IO.monoMsNow : BaseIO Nat)
   return .float (Nat.toFloat ms / 1000.0)
 
+/-- Python time.perf_counter(): return performance counter as float seconds. -/
+partial def timePerfCounter (_args : List Value) : InterpM Value := do
+  let ms ← (IO.monoMsNow : BaseIO Nat)
+  return .float (Nat.toFloat ms / 1000.0)
+
 /-- Python time.sleep(seconds): sleep for given duration. -/
 partial def timeSleep (args : List Value) : InterpM Value := do
   let ms : UInt32 := match args with

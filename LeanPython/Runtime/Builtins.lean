@@ -300,12 +300,20 @@ partial def builtinEnumerate (args : List Value) : InterpM Value := do
     idx := idx + 1
   allocList result
 
-/-- `zip(*iterables)` - returns list of tuples. -/
-partial def builtinZip (args : List Value) : InterpM Value := do
+/-- `zip(*iterables, strict=False)` - returns list of tuples. -/
+partial def builtinZip (args : List Value) (kwargs : List (String × Value)) : InterpM Value := do
   let iterables ← args.mapM iterValues
   if iterables.isEmpty then
     allocList #[]
   else
+    let strict := match kwargs.find? (fun (k, _) => k == "strict") with
+      | some (_, .bool true) => true
+      | _ => false
+    if strict then
+      let firstLen := iterables.head!.size
+      for iter in iterables do
+        if iter.size != firstLen then
+          throwValueError "zip() has arguments with different lengths"
     let minLen := iterables.foldl (fun acc arr => min acc arr.size) iterables.head!.size
     let mut result : Array Value := #[]
     for i in [:minLen] do
@@ -622,7 +630,7 @@ partial def callBuiltin (name : String) (args : List Value)
   | "sorted"     => builtinSorted args
   | "reversed"   => builtinReversed args
   | "enumerate"  => builtinEnumerate args
-  | "zip"        => builtinZip args
+  | "zip"        => builtinZip args kwargs
   | "list"       => builtinList args
   | "tuple"      => builtinTuple args
   | "isinstance" => builtinIsinstance args
@@ -1076,6 +1084,7 @@ partial def callBuiltin (name : String) (args : List Value)
   -- ============================================================
   | "time.time" => timeTime args
   | "time.monotonic" => timeMonotonic args
+  | "time.perf_counter" => timePerfCounter args
   | "time.sleep" => timeSleep args
   -- ============================================================
   -- logging module functions
