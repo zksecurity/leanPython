@@ -119,6 +119,7 @@ partial def valueEq (a b : Value) : InterpM Bool :=
   | .str a, .str b => return (a == b)
   | .bytes a, .bytes b => return (a == b)
   | .ellipsis, .ellipsis => return true
+  | .builtin a, .builtin b => return (a == b)
   | .exception a1 a2, .exception b1 b2 => return (a1 == b1 && a2 == b2)
   -- Cross-type numeric equality
   | .bool a, .int b => return ((if a then 1 else 0) == b)

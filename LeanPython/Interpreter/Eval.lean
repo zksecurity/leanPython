@@ -2653,7 +2653,9 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
     match ← callDunder obj "__getitem__" [idx] with
     | some v => return v
     | none => throwTypeError s!"'{typeName obj}' object is not subscriptable"
-  | .none => return .none  -- typing stubs: ClassVar[int], Generic[T], IO[bytes] etc.
+  | .none => return .none  -- typing stubs: Optional[int], Generic[T], IO[bytes] etc.
+  | .builtin "typing.ClassVar" => return (.builtin "typing.ClassVar")
+  | .builtin "typing.Final" => return (.builtin "typing.Final")
   | .classObj cref => do
     -- __class_getitem__ support: SomeClass[T] calls cls.__class_getitem__(T)
     let cd ← heapGetClassData cref
@@ -2835,7 +2837,7 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "get_type_hints" (.builtin "typing.get_type_hints")
     -- Stub common typing names as none so imports don't fail
     for n in ["Any", "Optional", "List", "Dict", "Set", "Tuple", "FrozenSet",
-              "ClassVar", "Final", "Self", "Union", "Callable", "Protocol",
+              "Self", "Union", "Callable", "Protocol",
               "runtime_checkable", "NamedTuple",
               "NoReturn", "SupportsInt", "SupportsIndex",
               "TypeAlias", "Literal", "IO", "Sequence", "Mapping",
@@ -2844,6 +2846,9 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
               "Type", "Generic", "Annotated",
               "overload", "cast", "no_type_check"] do
       ns := ns.insert n .none
+    -- ClassVar and Final are distinct markers (not .none) so Pydantic can skip them
+    ns := ns.insert "ClassVar" (.builtin "typing.ClassVar")
+    ns := ns.insert "Final" (.builtin "typing.Final")
     -- TypeVar is callable (returns .none as a stub type variable)
     ns := ns.insert "TypeVar" (.builtin "typing.TypeVar")
     -- override is a callable identity decorator (not .none)
@@ -5085,12 +5090,20 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
           | _ => pure ()
       | _ => pure ()
     | _ => pure ()
-  -- 2. Read own __annotations__
+  -- 2. Read own __annotations__ (skip ClassVar/Final fields)
+  let rawAnnPairsForFilter ← match cd.ns["__annotations_raw__"]? with
+    | some (.dict ref) => heapGetDict ref
+    | _ => pure #[]
+  let isClassVarOrFinal (name : String) : Bool :=
+    rawAnnPairsForFilter.any fun (k, v) =>
+      match k, v with
+      | .str s, .builtin bname => s == name && (bname == "typing.ClassVar" || bname == "typing.Final")
+      | _, _ => false
   let ownFieldNames ← match cd.ns["__annotations__"]? with
     | some (.dict annRef) => do
       let pairs ← heapGetDict annRef
-      pure (pairs.map fun (k, _) =>
-        match k with | .str s => s | _ => "").toList
+      pure (pairs.filterMap fun (k, _) =>
+        match k with | .str s => if isClassVarOrFinal s then none else some s | _ => none).toList
     | _ => pure ([] : List String)
   -- 3. Merge: inherited fields first, then own fields (own overrides inherited)
   let mut allFields : List (String × Option Value) := []
