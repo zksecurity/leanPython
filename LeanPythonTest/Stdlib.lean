@@ -735,3 +735,52 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- __get_pydantic_core_schema__ classmethod is callable and returns schema
 #eval assertPy "from pydantic_core import core_schema\nclass BoundedInt:\n    @classmethod\n    def __get_pydantic_core_schema__(cls, source_type, handler):\n        return core_schema.int_schema(ge=0, lt=100)\nresult = BoundedInt.__get_pydantic_core_schema__(None, None)\nprint(result['type'])" "int\n"
+
+-- ============================================================
+-- Phase 9a: leanSpec primitive type support
+-- ============================================================
+
+-- Exception hierarchy
+#eval assertPy "class SSZError(Exception):\n    pass\nclass SSZTypeError(SSZError):\n    pass\ntry:\n    raise SSZTypeError('bad type')\nexcept SSZError as e:\n    print(type(e).__name__)\n    print(str(e))" "SSZTypeError\nbad type\n"
+
+-- ABC with classmethod + abstractmethod
+#eval assertPy "from abc import ABC, abstractmethod\nclass SSZType(ABC):\n    @classmethod\n    @abstractmethod\n    def is_fixed_size(cls):\n        pass\nclass Concrete(SSZType):\n    @classmethod\n    def is_fixed_size(cls):\n        return True\nprint(Concrete.is_fixed_size())" "True\n"
+
+-- @override decorator (identity, doesn't fail)
+#eval assertPy "from typing import override\ndef base():\n    return 1\n@override\ndef child():\n    return 2\nprint(child())" "2\n"
+
+-- Multiple inheritance from int: basic construction
+#eval assertPy "from abc import ABC, abstractmethod\nclass SSZType(ABC):\n    @classmethod\n    @abstractmethod\n    def is_fixed_size(cls):\n        pass\nclass BaseUint(int, SSZType):\n    __slots__ = ()\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    def is_fixed_size(cls):\n        return True\nclass Uint64(BaseUint):\n    BITS = 64\nx = Uint64(42)\nprint(int(x))\nprint(type(x).__name__)" "42\nUint64\n"
+
+-- isinstance checks for int subclass
+#eval assertPy "from abc import ABC, abstractmethod\nclass SSZType(ABC):\n    @classmethod\n    @abstractmethod\n    def is_fixed_size(cls):\n        pass\nclass BaseUint(int, SSZType):\n    __slots__ = ()\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    @classmethod\n    def is_fixed_size(cls):\n        return True\nclass Uint64(BaseUint):\n    BITS = 64\nx = Uint64(42)\nprint(isinstance(x, Uint64))\nprint(isinstance(x, BaseUint))\nprint(isinstance(x, int))\nprint(isinstance(x, SSZType))" "True\nTrue\nTrue\nTrue\n"
+
+-- Arithmetic on int subclasses via dunder methods
+#eval assertPy "class BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __add__(self, other):\n        return type(self)(super().__add__(other))\nclass Uint64(BaseUint):\n    BITS = 64\nx = Uint64(10)\ny = Uint64(20)\nz = x + y\nprint(int(z))\nprint(type(z).__name__)" "30\nUint64\n"
+
+-- Comparison operators on int subclasses
+#eval assertPy "class BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint64(BaseUint):\n    BITS = 64\na = Uint64(10)\nb = Uint64(20)\nprint(a < b)\nprint(a == Uint64(10))\nprint(a > b)" "True\nTrue\nFalse\n"
+
+-- Range validation in __new__
+#eval assertPyError "class SSZValueError(Exception):\n    pass\nclass BaseUint(int):\n    BITS = 8\n    def __new__(cls, value):\n        if not isinstance(value, int) or isinstance(value, bool):\n            raise TypeError('Expected int')\n        int_value = int(value)\n        max_value = 2 ** cls.BITS - 1\n        if not (0 <= int_value <= max_value):\n            raise SSZValueError('out of range')\n        return super().__new__(cls, int_value)\nclass Uint8(BaseUint):\n    BITS = 8\nUint8(256)" "out of range"
+
+-- Negative value rejected
+#eval assertPyError "class SSZValueError(Exception):\n    pass\nclass BaseUint(int):\n    BITS = 8\n    def __new__(cls, value):\n        if not isinstance(value, int) or isinstance(value, bool):\n            raise TypeError('Expected int')\n        int_value = int(value)\n        if not (0 <= int_value <= 2 ** cls.BITS - 1):\n            raise SSZValueError('out of range')\n        return super().__new__(cls, int_value)\nclass Uint8(BaseUint):\n    BITS = 8\nUint8(-1)" "out of range"
+
+-- Bool rejected (isinstance(True, int) is True, but we check isinstance(value, bool))
+#eval assertPyError "class BaseUint(int):\n    BITS = 8\n    def __new__(cls, value):\n        if not isinstance(value, int) or isinstance(value, bool):\n            raise TypeError('Expected int')\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    BITS = 8\nUint8(True)" "Expected int"
+
+-- Bitwise operations on int subclasses
+#eval assertPy "class BaseUint(int):\n    BITS = 8\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __and__(self, other):\n        return type(self)(super().__and__(other))\n    def __or__(self, other):\n        return type(self)(super().__or__(other))\n    def __xor__(self, other):\n        return type(self)(super().__xor__(other))\nclass Uint8(BaseUint):\n    BITS = 8\na = Uint8(0b1100)\nb = Uint8(0b1010)\nprint(int(a & b))\nprint(int(a | b))\nprint(int(a ^ b))" "8\n14\n6\n"
+
+-- to_bytes on int subclass instance
+#eval assertPy "class BaseUint(int):\n    BITS = 64\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def serialize_to_bytes(self):\n        return int(self).to_bytes(self.BITS // 8, 'little')\nclass Uint64(BaseUint):\n    BITS = 64\nx = Uint64(256)\nb = x.serialize_to_bytes()\nprint(len(b))\nprint(b[0])\nprint(b[1])" "8\n0\n1\n"
+
+-- hash() works on int subclass instances (for Pydantic frozen models)
+#eval assertPy "class BaseUint(int):\n    BITS = 8\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\n    def __hash__(self):\n        return hash((type(self).__name__, int(self)))\nclass Uint8(BaseUint):\n    BITS = 8\nx = Uint8(42)\nh = hash(x)\nprint(isinstance(h, int))\nprint(h != 0)" "True\nTrue\n"
+
+-- ClassVar accessible on subclasses
+#eval assertPy "class BaseUint(int):\n    BITS = 0\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    BITS = 8\nclass Uint64(BaseUint):\n    BITS = 64\nprint(Uint8.BITS)\nprint(Uint64.BITS)" "8\n64\n"
+
+-- Multiple Uint subclasses
+#eval assertPy "class BaseUint(int):\n    BITS = 0\n    def __new__(cls, value):\n        return super().__new__(cls, int(value))\nclass Uint8(BaseUint):\n    BITS = 8\nclass Uint16(BaseUint):\n    BITS = 16\nclass Uint32(BaseUint):\n    BITS = 32\nclass Uint64(BaseUint):\n    BITS = 64\nprint(int(Uint8(255)))\nprint(int(Uint16(1000)))\nprint(int(Uint32(100000)))\nprint(int(Uint64(2**40)))" "255\n1000\n100000\n1099511627776\n"

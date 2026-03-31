@@ -780,7 +780,7 @@ For non-deterministic tests, structural equivalence is checked.
 | 8b | Pydantic: validators, serializers, core_schema | Done (field_validator, model_validator before/after, field_serializer, model_serializer, pydantic_core.core_schema module, evalCoreSchema engine, validator inheritance) |
 | 8c | Pydantic: advanced features for leanSpec | Done (extra="forbid" enforcement, alias_generator/to_camel, populate_by_name, model_dump by_alias, ConfigDict MRO inheritance, __get_pydantic_core_schema__ hook, validate_default/arbitrary_types_allowed parsing) |
 | 8d-e | Pydantic: remaining advanced features | Not started |
-| 9a | leanSpec: types | Not started |
+| 9a | leanSpec: types | In progress (built-in type subclassing: synthetic classObj for int/bytes, wrappedValue on InstanceData, super().__new__/dunder dispatch, custom exception hierarchy, @override decorator) |
 | 9b | leanSpec: SSZ merkleization | Not started |
 | 9c | leanSpec: consensus containers | Not started |
 | 9d | leanSpec: state transition | Not started |

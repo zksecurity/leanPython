@@ -52,6 +52,7 @@ structure InterpreterState where
   currentFile    : Option String
   currentPackage : Option String
   defaultFactories : Std.HashMap Nat Value := {}
+  builtinTypeClasses : Std.HashMap String Value := {}
   deriving Inhabited
 
 /-- Create a fresh interpreter state. -/

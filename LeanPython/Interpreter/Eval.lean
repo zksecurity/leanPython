@@ -290,6 +290,109 @@ private def resolveRelativeImport (currentPackage : Option String) (level : Nat)
         if base.isEmpty then .ok mn
         else .ok (base ++ "." ++ mn)
 
+-- ============================================================
+-- Int bitwise helpers for synthetic int class methods
+-- ============================================================
+
+private def synIntBitAnd (a b : Int) : Int :=
+  match a, b with
+  | .ofNat m, .ofNat n => .ofNat (m.land n)
+  | _, _ => 0
+
+private def synIntBitOr (a b : Int) : Int :=
+  match a, b with
+  | .ofNat m, .ofNat n => .ofNat (m.lor n)
+  | _, _ => a
+
+private def synIntBitXor (a b : Int) : Int :=
+  match a, b with
+  | .ofNat m, .ofNat n => .ofNat (m.xor n)
+  | _, _ => 0
+
+private def synIntBitNot (a : Int) : Int :=
+  -(a + 1)
+
+private def synIntShiftLeft (a : Int) (n : Nat) : Int :=
+  match a with
+  | .ofNat m => .ofNat (m <<< n)
+  | _ => a
+
+private def synIntShiftRight (a : Int) (n : Nat) : Int :=
+  match a with
+  | .ofNat m => .ofNat (m >>> n)
+  | _ => a
+
+-- ============================================================
+-- Synthetic class objects for built-in types (int, bytes, object)
+-- ============================================================
+
+/-- Get or create a synthetic class object for a built-in type.
+    These are needed so that `class Uint64(int, SSZType)` can include `int` in its MRO. -/
+private partial def getOrCreateBuiltinTypeClass (name : String) : InterpM Value := do
+  let st ← get
+  if let some cls := st.builtinTypeClasses[name]? then return cls
+  -- Create synthetic "object" class first if needed (base of all built-in types)
+  let objectCls ← if name == "object" then do
+    let cls ← allocClassObj { name := "object", bases := #[], mro := #[], ns := {}, slots := none }
+    -- MRO of object is just [object]
+    match cls with
+    | .classObj cref => do
+      heapSetClassData cref { name := "object", bases := #[], mro := #[cls], ns := {}, slots := none }
+    | _ => pure ()
+    modify fun s => { s with builtinTypeClasses := s.builtinTypeClasses.insert "object" cls }
+    pure cls
+  else do
+    -- Ensure "object" exists
+    let obj ← getOrCreateBuiltinTypeClass "object"
+    pure obj
+  if name == "object" then return objectCls
+  -- Build namespace with dunder methods for built-in type
+  let mut ns : Std.HashMap String Value := {}
+  if name == "int" then
+    -- Populate int's namespace with dunder methods as builtins
+    for dunder in [
+      "__new__", "__add__", "__radd__", "__sub__", "__rsub__",
+      "__mul__", "__rmul__", "__floordiv__", "__rfloordiv__",
+      "__mod__", "__rmod__", "__pow__", "__rpow__",
+      "__and__", "__rand__", "__or__", "__ror__",
+      "__xor__", "__rxor__", "__lshift__", "__rlshift__",
+      "__rshift__", "__rrshift__", "__neg__", "__invert__", "__pos__",
+      "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+      "__divmod__", "__rdivmod__",
+      "__index__", "__int__", "__bool__", "__float__",
+      "__hash__", "__repr__", "__str__", "__abs__",
+      "to_bytes", "from_bytes", "bit_length"
+    ] do
+      ns := ns.insert dunder (.builtin s!"int.{dunder}")
+  else if name == "bytes" then
+    for dunder in [
+      "__new__", "__add__", "__radd__", "__mul__", "__rmul__",
+      "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
+      "__len__", "__getitem__", "__contains__", "__iter__",
+      "__hash__", "__repr__", "__str__",
+      "hex", "fromhex", "decode"
+    ] do
+      ns := ns.insert dunder (.builtin s!"bytes.{dunder}")
+  -- Create the class with object as base
+  let cls ← allocClassObj { name := name, bases := #[objectCls], mro := #[], ns := ns, slots := none }
+  -- Compute MRO: [self, object]
+  match cls with
+  | .classObj cref => do
+    heapSetClassData cref { name := name, bases := #[objectCls], mro := #[cls, objectCls], ns := ns, slots := none }
+  | _ => pure ()
+  modify fun s => { s with builtinTypeClasses := s.builtinTypeClasses.insert name cls }
+  return cls
+
+/-- Resolve class bases, converting `.builtin "int"` etc. to synthetic class objects. -/
+private def resolveClassBases (bases : List Value) : InterpM (List Value) := do
+  bases.mapM fun base =>
+    match base with
+    | .builtin name =>
+      if name == "int" || name == "bytes" || name == "object" || name == "bool" then
+        getOrCreateBuiltinTypeClass name
+      else pure base
+    | _ => pure base
+
 mutual
 
 -- ============================================================
@@ -1273,6 +1376,238 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         return .int 1000
       else if name == "sys.setrecursionlimit" then
         return .none
+      -- ============================================================
+      -- Synthetic built-in type dunder methods (int.*, bytes.*)
+      -- ============================================================
+      else if name == "int.__new__" then do
+        -- int.__new__(cls, value) — create an instance of cls with wrappedValue
+        -- May be called via super().__new__(cls, value) which prepends inst,
+        -- giving [inst, cls, value]. Extract the last class and value from args.
+        let (cls, val) ← match args with
+          | [cls@(.classObj _), v] => pure (cls, v)
+          | [_, cls@(.classObj _), v] => pure (cls, v)  -- super() prepends inst
+          | [_cls@(.classObj _)] => throwTypeError "int.__new__() missing required argument: 'value'"
+          | _ => throwTypeError "int.__new__(cls, value) requires a class and an int value"
+        match val with
+        | .int n =>
+          allocInstance { cls := cls, attrs := {}, wrappedValue := some (.int n) }
+        | .bool b =>
+          allocInstance { cls := cls, attrs := {}, wrappedValue := some (.int (if b then 1 else 0)) }
+        | .instance iref => do
+          let id_ ← heapGetInstanceData iref
+          match id_.wrappedValue with
+          | some (.int n) =>
+            allocInstance { cls := cls, attrs := {}, wrappedValue := some (.int n) }
+          | _ => throwTypeError s!"int.__new__: cannot convert {typeName val} to int"
+        | other => throwTypeError s!"int.__new__: cannot convert {typeName other} to int"
+      else if name == "bytes.__new__" then do
+        match args with
+        | [cls@(.classObj _), .bytes b] =>
+          allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes b) }
+        | [cls@(.classObj _), .int n] => do
+          -- bytes(n) creates n zero bytes
+          let mut buf := ByteArray.empty
+          for _ in List.range n.toNat do
+            buf := buf.push 0
+          allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes buf) }
+        | [_cls@(.classObj _)] =>
+          throwTypeError "bytes.__new__() missing required argument"
+        | _ => throwTypeError "bytes.__new__(cls, value) requires a class and bytes"
+      else if name.startsWith "int." then do
+        -- Dispatch int dunder methods: extract wrapped int values
+        let methodName := String.ofList (name.toList.drop "int.".length)
+        let extractInt : Value → InterpM Int := fun v =>
+          match v with
+          | .int n => pure n
+          | .bool b => pure (if b then 1 else 0)
+          | .instance iref => do
+            let id_ ← heapGetInstanceData iref
+            match id_.wrappedValue with
+            | some (.int n) => pure n
+            | _ => throwTypeError s!"expected int, got {typeName v}"
+          | other => throwTypeError s!"expected int, got {typeName other}"
+        match methodName with
+        | "__add__" | "__radd__" => match args with
+          | [a, b] => return .int ((← extractInt a) + (← extractInt b))
+          | _ => throwTypeError "int.__add__ takes 2 arguments"
+        | "__sub__" => match args with
+          | [a, b] => return .int ((← extractInt a) - (← extractInt b))
+          | _ => throwTypeError "int.__sub__ takes 2 arguments"
+        | "__rsub__" => match args with
+          | [a, b] => return .int ((← extractInt b) - (← extractInt a))
+          | _ => throwTypeError "int.__rsub__ takes 2 arguments"
+        | "__mul__" | "__rmul__" => match args with
+          | [a, b] => return .int ((← extractInt a) * (← extractInt b))
+          | _ => throwTypeError "int.__mul__ takes 2 arguments"
+        | "__floordiv__" => match args with
+          | [a, b] => do
+            let bv ← extractInt b
+            if bv == 0 then throwRuntimeError (.zeroDivision "integer division or modulo by zero")
+            return .int ((← extractInt a) / bv)
+          | _ => throwTypeError "int.__floordiv__ takes 2 arguments"
+        | "__rfloordiv__" => match args with
+          | [a, b] => do
+            let av ← extractInt a
+            if av == 0 then throwRuntimeError (.zeroDivision "integer division or modulo by zero")
+            return .int ((← extractInt b) / av)
+          | _ => throwTypeError "int.__rfloordiv__ takes 2 arguments"
+        | "__mod__" => match args with
+          | [a, b] => do
+            let bv ← extractInt b
+            if bv == 0 then throwRuntimeError (.zeroDivision "integer division or modulo by zero")
+            return .int ((← extractInt a) % bv)
+          | _ => throwTypeError "int.__mod__ takes 2 arguments"
+        | "__rmod__" => match args with
+          | [a, b] => do
+            let av ← extractInt a
+            if av == 0 then throwRuntimeError (.zeroDivision "integer division or modulo by zero")
+            return .int ((← extractInt b) % av)
+          | _ => throwTypeError "int.__rmod__ takes 2 arguments"
+        | "__pow__" => match args with
+          | [a, b] => do
+            let av ← extractInt a
+            let bv ← extractInt b
+            if bv < 0 then return .float (Float.pow (Float.ofInt av) (Float.ofInt bv))
+            else
+              let mut result : Int := 1
+              for _ in List.range bv.toNat do
+                result := result * av
+              return .int result
+          | _ => throwTypeError "int.__pow__ takes 2 arguments"
+        | "__rpow__" => match args with
+          | [a, b] => do
+            let av ← extractInt a
+            let bv ← extractInt b
+            if av < 0 then return .float (Float.pow (Float.ofInt bv) (Float.ofInt av))
+            else
+              let mut result : Int := 1
+              for _ in List.range av.toNat do
+                result := result * bv
+              return .int result
+          | _ => throwTypeError "int.__rpow__ takes 2 arguments"
+        | "__and__" | "__rand__" => match args with
+          | [a, b] => return .int (synIntBitAnd (← extractInt a) (← extractInt b))
+          | _ => throwTypeError "int.__and__ takes 2 arguments"
+        | "__or__" | "__ror__" => match args with
+          | [a, b] => return .int (synIntBitOr (← extractInt a) (← extractInt b))
+          | _ => throwTypeError "int.__or__ takes 2 arguments"
+        | "__xor__" | "__rxor__" => match args with
+          | [a, b] => return .int (synIntBitXor (← extractInt a) (← extractInt b))
+          | _ => throwTypeError "int.__xor__ takes 2 arguments"
+        | "__lshift__" | "__rlshift__" => match args with
+          | [a, b] => do
+            let av ← extractInt a
+            let bv ← extractInt b
+            if methodName == "__rlshift__" then
+              return .int (synIntShiftLeft bv av.toNat)
+            else
+              return .int (synIntShiftLeft av bv.toNat)
+          | _ => throwTypeError "int.__lshift__ takes 2 arguments"
+        | "__rshift__" | "__rrshift__" => match args with
+          | [a, b] => do
+            let av ← extractInt a
+            let bv ← extractInt b
+            if methodName == "__rrshift__" then
+              return .int (synIntShiftRight bv av.toNat)
+            else
+              return .int (synIntShiftRight av bv.toNat)
+          | _ => throwTypeError "int.__rshift__ takes 2 arguments"
+        | "__neg__" => match args with
+          | [a] => return .int (-(← extractInt a))
+          | _ => throwTypeError "int.__neg__ takes 1 argument"
+        | "__pos__" => match args with
+          | [a] => return .int (← extractInt a)
+          | _ => throwTypeError "int.__pos__ takes 1 argument"
+        | "__invert__" => match args with
+          | [a] => return .int (synIntBitNot (← extractInt a))
+          | _ => throwTypeError "int.__invert__ takes 1 argument"
+        | "__abs__" => match args with
+          | [a] => return .int (Int.natAbs (← extractInt a))
+          | _ => throwTypeError "int.__abs__ takes 1 argument"
+        | "__eq__" => match args with
+          | [a, b] => return .bool ((← extractInt a) == (← extractInt b))
+          | _ => throwTypeError "int.__eq__ takes 2 arguments"
+        | "__ne__" => match args with
+          | [a, b] => return .bool ((← extractInt a) != (← extractInt b))
+          | _ => throwTypeError "int.__ne__ takes 2 arguments"
+        | "__lt__" => match args with
+          | [a, b] => return .bool ((← extractInt a) < (← extractInt b))
+          | _ => throwTypeError "int.__lt__ takes 2 arguments"
+        | "__le__" => match args with
+          | [a, b] => return .bool ((← extractInt a) <= (← extractInt b))
+          | _ => throwTypeError "int.__le__ takes 2 arguments"
+        | "__gt__" => match args with
+          | [a, b] => return .bool ((← extractInt a) > (← extractInt b))
+          | _ => throwTypeError "int.__gt__ takes 2 arguments"
+        | "__ge__" => match args with
+          | [a, b] => return .bool ((← extractInt a) >= (← extractInt b))
+          | _ => throwTypeError "int.__ge__ takes 2 arguments"
+        | "__divmod__" => match args with
+          | [a, b] => do
+            let av ← extractInt a; let bv ← extractInt b
+            if bv == 0 then throwRuntimeError (.zeroDivision "integer division or modulo by zero")
+            return .tuple #[.int (av / bv), .int (av % bv)]
+          | _ => throwTypeError "int.__divmod__ takes 2 arguments"
+        | "__rdivmod__" => match args with
+          | [a, b] => do
+            let av ← extractInt a; let bv ← extractInt b
+            if av == 0 then throwRuntimeError (.zeroDivision "integer division or modulo by zero")
+            return .tuple #[.int (bv / av), .int (bv % av)]
+          | _ => throwTypeError "int.__rdivmod__ takes 2 arguments"
+        | "__index__" | "__int__" => match args with
+          | [a] => return .int (← extractInt a)
+          | _ => throwTypeError "int.__index__ takes 1 argument"
+        | "__bool__" => match args with
+          | [a] => return .bool ((← extractInt a) != 0)
+          | _ => throwTypeError "int.__bool__ takes 1 argument"
+        | "__float__" => match args with
+          | [a] => return .float (Float.ofInt (← extractInt a))
+          | _ => throwTypeError "int.__float__ takes 1 argument"
+        | "__hash__" => match args with
+          | [a] => return .int (← extractInt a)
+          | _ => throwTypeError "int.__hash__ takes 1 argument"
+        | "__repr__" | "__str__" => match args with
+          | [a] => return .str (toString (← extractInt a))
+          | _ => throwTypeError "int.__repr__ takes 1 argument"
+        | "to_bytes" => match args with
+          | [self_, .int length, .str byteorder] => do
+            let n ← extractInt self_
+            let len := length.toNat
+            let unsigned := if n < 0 then (synIntShiftLeft 1 (len * 8)) + n else n
+            let mut bs := ByteArray.empty
+            if byteorder == "little" then
+              for i in List.range len do
+                bs := bs.push ((unsigned >>> (i * 8)) % 256).toNat.toUInt8
+            else
+              for i in List.range len do
+                bs := bs.push ((unsigned >>> ((len - 1 - i) * 8)) % 256).toNat.toUInt8
+            return .bytes bs
+          | _ => throwTypeError "int.to_bytes(length, byteorder) requires (self, int, str)"
+        | "from_bytes" => match args with
+          | [.bytes bs, .str byteorder] => do
+            let mut n : Int := 0
+            if byteorder == "little" then
+              for i in List.range bs.size do
+                n := n + (bs.get! i).toNat * (1 <<< (i * 8))
+            else
+              for i in List.range bs.size do
+                n := n + (bs.get! i).toNat * (1 <<< ((bs.size - 1 - i) * 8))
+            return .int n
+          | _ => throwTypeError "int.from_bytes(bytes, byteorder) requires (bytes, str)"
+        | "bit_length" => match args with
+          | [a] => do
+            let n ← extractInt a
+            let abs := Int.natAbs n
+            if abs == 0 then return .int 0
+            else
+              let mut bits := 0
+              let mut v := abs
+              while v > 0 do
+                bits := bits + 1
+                v := v / 2
+              return .int bits
+          | _ => throwTypeError "int.bit_length takes 1 argument"
+        | _ => throwTypeError s!"int.{methodName} is not implemented"
       else
         callBuiltin name args kwargs
   | .function ref => do
@@ -1435,7 +1770,37 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             let _ ← callRegularFunc fd scopeWithClass
           | _ => let _ ← callValueDispatch fn (inst :: args') kwargs'
         | none =>
-          if !args'.isEmpty && newFound.isNone then
+          -- Check if this is an exception subclass (inherits from builtin exception)
+          let mut isExcSubclass := false
+          for base in cd.bases do
+            match base with
+            | .builtin n => if isBuiltinExceptionName n then isExcSubclass := true
+            | .classObj bref => do
+              -- Check if the base class inherits from a builtin exception
+              let bcd ← heapGetClassData bref
+              for gp in bcd.bases do
+                match gp with
+                | .builtin gn => if isBuiltinExceptionName gn then isExcSubclass := true
+                | .classObj gpref => do
+                  let gpcd ← heapGetClassData gpref
+                  for ggp in gpcd.bases do
+                    match ggp with
+                    | .builtin ggn => if isBuiltinExceptionName ggn then isExcSubclass := true
+                    | _ => pure ()
+                | _ => pure ()
+            | _ => pure ()
+          if isExcSubclass then do
+            -- Exception subclass: store message in instance attrs
+            let msg ← match args' with
+              | [] => pure ""
+              | [v] => valueToStr v
+              | _ => do let strs ← args'.mapM valueToStr; pure (", ".intercalate strs)
+            let iref ← match inst with
+              | .instance ir => pure ir
+              | _ => throwTypeError "exception construction failed"
+            let id_ ← heapGetInstanceData iref
+            heapSetInstanceData iref { id_ with attrs := id_.attrs.insert "__message__" (.str msg) }
+          else if !args'.isEmpty && newFound.isNone then
             throwTypeError s!"{cd.name}() takes no arguments"
         -- Pydantic: apply model_validator(mode="after")
         if isPydantic then
@@ -1645,6 +2010,8 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     if knownTupleMethods.contains attr then return .boundMethod obj attr
     else throwAttributeError s!"'tuple' object has no attribute '{attr}'"
   | .builtin name =>
+    -- __name__ on builtin types returns the type name
+    if attr == "__name__" then return .str name
     -- Type methods like int.from_bytes, bytes.fromhex, object.__new__
     match name, attr with
     | "int", "from_bytes" => return .boundMethod obj attr
@@ -2126,21 +2493,24 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     for n in ["Any", "Optional", "List", "Dict", "Set", "Tuple", "FrozenSet",
               "ClassVar", "Final", "Self", "Union", "Callable", "Protocol",
               "runtime_checkable", "NamedTuple",
-              "override", "NoReturn", "SupportsInt", "SupportsIndex",
+              "NoReturn", "SupportsInt", "SupportsIndex",
               "TypeAlias", "Literal", "IO", "Sequence", "Mapping",
               "Iterator", "Iterable", "Generator", "Coroutine",
               "Awaitable", "AsyncIterator", "AsyncGenerator",
               "Type", "Generic", "TypeVar", "Annotated",
               "overload", "cast", "no_type_check"] do
       ns := ns.insert n .none
+    -- override is a callable identity decorator (not .none)
+    ns := ns.insert "override" (.builtin "typing.override")
     some <$> mkMod ns
   | "typing_extensions" =>
     -- Alias for typing for compatibility
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "TYPE_CHECKING" (.bool false)
-    for n in ["override", "Self", "Protocol", "runtime_checkable",
+    for n in ["Self", "Protocol", "runtime_checkable",
               "Annotated", "TypeAlias", "get_type_hints"] do
       ns := ns.insert n .none
+    ns := ns.insert "override" (.builtin "typing.override")
     some <$> mkMod ns
   | "abc" => do
     -- Create real ABC base class
@@ -2813,8 +3183,9 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     for n in names do declareNonlocal n
 
   | .classDef cd => do
-    -- Evaluate base classes
-    let bases ← cd.bases.mapM evalExpr
+    -- Evaluate base classes, resolving built-in types to synthetic class objects
+    let rawBases ← cd.bases.mapM evalExpr
+    let bases ← resolveClassBases rawBases
     -- Execute class body in a new scope
     pushScope {}
     -- Initialize __annotations__ dict for the class body
@@ -2946,6 +3317,39 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
           throwRuntimeError (.runtimeError name)
         else
           throwTypeError "exceptions must derive from BaseException"
+      | .instance iref => do
+        -- Exception subclass instance: extract class name, message, and hierarchy
+        let id_ ← heapGetInstanceData iref
+        let (clsName, parentNames) ← match id_.cls with
+          | .classObj cref => do
+            let cd ← heapGetClassData cref
+            -- Collect parent class names from bases (builtin exception ancestors)
+            let mut parents : List String := []
+            for base in cd.bases do
+              match base with
+              | .builtin n => parents := parents ++ [n]
+              | .classObj bref => do
+                let bcd ← heapGetClassData bref
+                parents := parents ++ [bcd.name]
+                -- Also add grandparent builtins
+                for gp in bcd.bases do
+                  match gp with
+                  | .builtin gn => parents := parents ++ [gn]
+                  | .classObj gpref => do
+                    let gpcd ← heapGetClassData gpref
+                    parents := parents ++ [gpcd.name]
+                  | _ => pure ()
+              | _ => pure ()
+            pure (cd.name, parents)
+          | _ => pure ("Exception", [])
+        let msg := match id_.attrs["__message__"]? with
+          | some (.str s) => s
+          | _ => ""
+        throwRuntimeError (.customError clsName msg parentNames)
+      | .classObj cref => do
+        -- raise SomeExceptionClass (no args)
+        let cd ← heapGetClassData cref
+        throwRuntimeError (.customError cd.name "" [])
       | _ => throwTypeError "exceptions must derive from BaseException"
     | none => do
       -- Bare raise: re-raise active exception
@@ -2980,14 +3384,21 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
             | some typeExpr => do
               let typeVal ← evalExpr typeExpr
               match typeVal with
-              | .builtin typN => pure (exceptionMatches errorTypeName typN)
+              | .builtin typN => pure (customExceptionMatches e typN)
+              | .classObj ecref => do
+                -- except CustomExceptionClass: ...
+                let ecd ← heapGetClassData ecref
+                pure (customExceptionMatches e ecd.name)
               | .tuple typeVals => do
                 -- except (TypeError, ValueError): ...
                 let mut found := false
                 for tv in typeVals do
                   match tv with
                   | .builtin typN =>
-                    if exceptionMatches errorTypeName typN then found := true; break
+                    if customExceptionMatches e typN then found := true; break
+                  | .classObj ecref => do
+                    let ecd ← heapGetClassData ecref
+                    if customExceptionMatches e ecd.name then found := true; break
                   | _ => pure ()
                 pure found
               | _ => pure false
@@ -3310,6 +3721,7 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
       | .instance iref => do
         let id_ ← heapGetInstanceData iref
         pure id_.cls
+      | .classObj _ => pure inst  -- cls itself is the class (e.g., in __new__)
       | _ => pure Value.none
     match instCls with
     | .classObj cref => do
@@ -3335,6 +3747,15 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
           let scope ← bindFuncParams fd.params (inst :: args) [] fd.defaults fd.kwDefaults
           let scopeWithClass := scope.insert "__class__" definingCls
           callRegularFunc fd scopeWithClass
+        | .classMethod innerFn =>
+          -- classmethod: call with class as first arg
+          callValueDispatch innerFn (inst :: args) []
+        | .staticMethod innerFn =>
+          -- staticmethod: call without self
+          callValueDispatch innerFn args []
+        | .builtin _ =>
+          -- Builtins in synthetic type classes: prepend inst (self/cls)
+          callValueDispatch fn (inst :: args) []
         | _ => callValueDispatch fn (inst :: args) []
       | none => throwAttributeError s!"'super' object has no attribute '{method}'"
     | _ => throwAttributeError s!"'super' object has no attribute '{method}'"

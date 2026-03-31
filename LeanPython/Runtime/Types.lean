@@ -85,10 +85,13 @@ structure ClassData where
   ns        : Std.HashMap String Value
   slots     : Option (Array String) := none
 
-/-- Runtime instance data stored on the heap. -/
+/-- Runtime instance data stored on the heap.
+    `wrappedValue` stores the underlying built-in value for subclasses of int/bytes
+    (e.g., `class Uint64(int, SSZType)` produces instances with `wrappedValue := some (.int n)`). -/
 structure InstanceData where
   cls   : Value
   attrs : Std.HashMap String Value
+  wrappedValue : Option Value := none
 
 /-- Runtime module data stored on the heap. -/
 structure ModuleData where
@@ -133,6 +136,7 @@ inductive RuntimeError where
   | runtimeError    : String → RuntimeError
   | importError     : String → RuntimeError
   | moduleNotFound  : String → RuntimeError
+  | customError     : String → String → List String → RuntimeError  -- typeName, message, parentTypeNames
   deriving Repr
 
 instance : ToString RuntimeError where
@@ -151,6 +155,7 @@ instance : ToString RuntimeError where
     | .runtimeError s    => s!"RuntimeError: {s}"
     | .importError s     => s!"ImportError: {s}"
     | .moduleNotFound s  => s!"ModuleNotFoundError: No module named '{s}'"
+    | .customError tn msg _ => if msg.isEmpty then tn else s!"{tn}: {msg}"
 
 -- ============================================================
 -- BEq Value (needed for dict lookup, == operator, in operator)
@@ -221,9 +226,10 @@ partial def Value.toStr : Value → String
   | .int n => toString n
   | .float f =>
     let s := toString f
-    -- Lean's Float.toString may not match Python exactly, but good enough
     s
   | .str s => s
+  -- str(exception) returns just the message (not the type name)
+  | .exception _typeName msg => msg
   | .bytes _b => "b'...'"
   | .list _ => "[...]"
   | .tuple elems =>
@@ -237,7 +243,6 @@ partial def Value.toStr : Value → String
   | .builtin name => s!"<built-in function {name}>"
   | .ellipsis => "Ellipsis"
   | .boundMethod _ method => s!"<bound method {method}>"
-  | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
   | .generator _ => "<generator object>"
   | .classObj _ => "<class>"
   | .instance _ => "<instance>"
@@ -268,7 +273,7 @@ partial def Value.toRepr : Value → String
   | .builtin name => s!"<built-in function {name}>"
   | .ellipsis => "Ellipsis"
   | .boundMethod _ method => s!"<bound method {method}>"
-  | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}({msg})"
+  | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}('{msg}')"
   | .generator _ => "<generator object>"
   | .classObj _ => "<class>"
   | .instance _ => "<instance>"
@@ -301,6 +306,7 @@ def runtimeErrorTypeName : RuntimeError → String
   | .runtimeError _   => "RuntimeError"
   | .importError _    => "ImportError"
   | .moduleNotFound _ => "ModuleNotFoundError"
+  | .customError tn _ _ => tn
 
 /-- Get the message portion of a RuntimeError. -/
 def runtimeErrorMessage : RuntimeError → String
@@ -309,6 +315,7 @@ def runtimeErrorMessage : RuntimeError → String
   | .attributeError s | .overflowError s | .notImplemented s
   | .runtimeError s | .importError s | .moduleNotFound s => s
   | .stopIteration => ""
+  | .customError _ msg _ => msg
 
 /-- Check if an exception type matches a handler type, respecting the hierarchy.
     `Exception` catches all standard errors, `BaseException` catches everything. -/
@@ -320,6 +327,14 @@ def exceptionMatches (errorTypeName handlerTypeName : String) : Bool :=
     errorTypeName != "GeneratorExit"
   else
     errorTypeName == handlerTypeName
+
+/-- Check if a custom exception matches a handler, considering parent type names. -/
+def customExceptionMatches (error : RuntimeError) (handlerTypeName : String) : Bool :=
+  match error with
+  | .customError tn _ parents =>
+    if handlerTypeName == "BaseException" || handlerTypeName == "Exception" then true
+    else tn == handlerTypeName || parents.any (· == handlerTypeName)
+  | other => exceptionMatches (runtimeErrorTypeName other) handlerTypeName
 
 -- ============================================================
 -- Builtin name table
@@ -349,5 +364,19 @@ def builtinNames : List String :=
 /-- Check if a name is a built-in function. -/
 def isBuiltinName (name : String) : Bool :=
   builtinNames.contains name
+
+/-- Check if a name is a built-in exception class. -/
+def isBuiltinExceptionName (name : String) : Bool :=
+  name == "Exception" || name == "BaseException" ||
+  name == "ValueError" || name == "TypeError" ||
+  name == "KeyError" || name == "IndexError" ||
+  name == "RuntimeError" || name == "ZeroDivisionError" ||
+  name == "AssertionError" || name == "AttributeError" ||
+  name == "OverflowError" || name == "StopIteration" ||
+  name == "NotImplementedError" || name == "NameError" ||
+  name == "OSError" || name == "IOError" ||
+  name == "FileNotFoundError" || name == "ImportError" ||
+  name == "ModuleNotFoundError" || name == "SystemExit" ||
+  name == "KeyboardInterrupt" || name == "GeneratorExit"
 
 end LeanPython.Runtime

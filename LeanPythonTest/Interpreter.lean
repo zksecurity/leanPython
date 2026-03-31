@@ -239,8 +239,8 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 -- Bare except catches everything
 #eval assertPy "try:\n    raise ValueError(\"x\")\nexcept:\n    print(\"caught\")\n" "caught\n"
 
--- Exception as binding gives exception value
-#eval assertPy "try:\n    raise ValueError(\"bad value\")\nexcept ValueError as e:\n    print(e)\n" "ValueError(bad value)\n"
+-- Exception as binding gives message string
+#eval assertPy "try:\n    raise ValueError(\"bad value\")\nexcept ValueError as e:\n    print(e)\n" "bad value\n"
 
 -- Finally always runs
 #eval assertPy "try:\n    raise ValueError(\"x\")\nexcept ValueError:\n    print(\"caught\")\nfinally:\n    print(\"done\")\n" "caught\ndone\n"

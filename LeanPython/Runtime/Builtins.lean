@@ -98,6 +98,7 @@ partial def builtinType (args : List Value) : InterpM Value := do
     | .instance ref => do
       let id_ ← heapGetInstanceData ref
       return id_.cls
+    | .exception typeName _ => return .builtin typeName
     | _ => return .str s!"<class '{typeName v}'>"
   | _ => throwTypeError "type() takes 1 or 3 arguments"
 
@@ -112,6 +113,11 @@ def builtinInt (args : List Value) : InterpM Value := do
     match s.toList.dropWhile Char.isWhitespace |>.reverse |>.dropWhile Char.isWhitespace |>.reverse |> String.ofList |>.toInt? with
     | some n => return .int n
     | none => throwValueError s!"invalid literal for int() with base 10: '{s}'"
+  | [.instance iref] => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some (.int n) => return .int n
+    | _ => throwTypeError "int() argument must be a string or a number"
   | _ => throwTypeError "int() argument must be a string or a number"
 
 /-- `float(x)` - convert to float. -/
@@ -320,6 +326,7 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
     match name with
     | "object" => return .bool true  -- everything is an instance of object
     | _ =>
+      -- First check if it's a direct built-in value match
       let tn := typeName obj
       let isMatch := match name with
         | "int" => tn == "int" || tn == "bool"
@@ -332,7 +339,24 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
         | "set" => tn == "set"
         | "bytes" => tn == "bytes"
         | _ => false
-      return .bool isMatch
+      if isMatch then return .bool true
+      -- For instances, check if any class in MRO is the synthetic built-in type
+      match obj with
+      | .instance iref => do
+        let id_ ← heapGetInstanceData iref
+        match id_.cls with
+        | .classObj cref => do
+          let cd ← heapGetClassData cref
+          let mut found := false
+          for mroEntry in cd.mro do
+            match mroEntry with
+            | .classObj mref => do
+              let mcd ← heapGetClassData mref
+              if mcd.name == name then found := true
+            | _ => pure ()
+          return .bool found
+        | _ => return .bool false
+      | _ => return .bool false
   | [.instance instRef, .classObj _] =>
     return .bool (← isInstanceOfClass instRef args[1]!)
   | [.instance instRef, .tuple classes] => do
@@ -341,22 +365,52 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
       match cls with
       | .classObj _ =>
         if ← isInstanceOfClass instRef cls then return .bool true
-      | .builtin "object" => return .bool true
+      | .builtin bname => do
+        if bname == "object" then return .bool true
+        -- Check MRO for synthetic built-in type
+        let id_ ← heapGetInstanceData instRef
+        match id_.cls with
+        | .classObj cref => do
+          let cd ← heapGetClassData cref
+          for mroEntry in cd.mro do
+            match mroEntry with
+            | .classObj mref => do
+              let mcd ← heapGetClassData mref
+              if mcd.name == bname then return .bool true
+            | _ => pure ()
+        | _ => pure ()
       | _ => pure ()
     return .bool false
   | [_, .classObj _] => return .bool false  -- non-instance is not an instance of a custom class
   | _ => throwTypeError "isinstance() takes 2 arguments"
 
+/-- Hash a single value for tuple/object hashing. -/
+private partial def hashValue : Value → InterpM Int
+  | .int n => pure n
+  | .bool b => pure (if b then 1 else 0)
+  | .str s => pure (hash s).toNat
+  | .none => pure 0x345678
+  | .float f => pure (hash (toString f)).toNat
+  | .tuple items => do
+    -- Combine element hashes using simple mixing
+    let mut h : Int := 0x345678
+    for item in items do
+      let ih ← hashValue item
+      h := h * 1000003 + ih
+    pure h
+  | .classObj ref => pure ref
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some v => hashValue v
+    | none => pure iref  -- use heap ref as fallback
+  | _ => pure 0
+
 /-- `hash(obj)` - basic hash. -/
-def builtinHash (args : List Value) : InterpM Value := do
+partial def builtinHash (args : List Value) : InterpM Value := do
   match args with
-  | [.int n] => return .int n
-  | [.bool b] => return .int (if b then 1 else 0)
-  | [.str s] => return .int (hash s).toNat
-  | [.none] => return .int 0
-  | [.float _f] => return .int 0  -- stub
-  | [.tuple _] => return .int 0  -- stub
-  | _ => throwTypeError "unhashable type"
+  | [v] => return .int (← hashValue v)
+  | _ => throwTypeError "hash() takes exactly 1 argument"
 
 /-- `id(obj)` - identity (stub). -/
 def builtinId (args : List Value) : InterpM Value := do
@@ -528,10 +582,13 @@ partial def callBuiltin (name : String) (args : List Value)
   | "super" => do
     match args with
     | [] => do
-      -- Implicit super(): look up __class__ and self from current scope
+      -- Implicit super(): look up __class__ and first param from current scope
       let cls ← lookupVariable "__class__"
-      let self ← lookupVariable "self"
-      return .superObj cls self
+      -- Try "self" first, then "cls" (for __new__/classmethods)
+      let inst ← try lookupVariable "self"
+        catch _ => try lookupVariable "cls"
+          catch _ => throwTypeError "super(): __class__ cell not found"
+      return .superObj cls inst
     | [cls, inst] => return .superObj cls inst
     | _ => throwTypeError "super() takes 0 or 2 arguments"
   | "hash"       => builtinHash args
@@ -775,6 +832,10 @@ partial def callBuiltin (name : String) (args : List Value)
     match args with
     | [f] => return f
     | _ => throwTypeError "abstractmethod() takes exactly 1 argument"
+  | "typing.override" => do
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "override() takes exactly 1 argument"
   -- ============================================================
   -- dataclasses module functions
   -- ============================================================

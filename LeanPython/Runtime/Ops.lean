@@ -178,9 +178,7 @@ partial def valueToStr (v : Value) : InterpM String :=
     return s!"<function {fd.name}>"
   | .builtin name => return s!"<built-in function {name}>"
   | .boundMethod _ method => return s!"<bound method {method}>"
-  | .exception typeName msg =>
-    if msg.isEmpty then return typeName
-    else return s!"{typeName}({msg})"
+  | .exception _typeName msg => return msg
   | .generator _ => return "<generator object>"
   | .classObj ref => do
     let cd ← heapGetClassData ref
