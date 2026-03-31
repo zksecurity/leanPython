@@ -2605,7 +2605,11 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
       let ni := normalizeIndex i arr.size
       if ni < 0 || ni >= arr.size then throwIndexError "tuple index out of range"
       return arr[ni.toNat]!
-    | _ => throwTypeError "tuple indices must be integers"
+    | .tuple #[start, stop, step] => do
+      let (s, e, st) ← computeSliceIndices arr.size (some start) (some stop) (some step)
+      let result := (sliceIndices s e st).filterMap fun i => arr[i]?
+      return .tuple result.toArray
+    | _ => throwTypeError "tuple indices must be integers or slices"
   | .str s =>
     match idx with
     | .int i =>

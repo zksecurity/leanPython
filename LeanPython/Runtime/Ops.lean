@@ -91,7 +91,14 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .exception _ _ => return true
   | .generator _ => return true
   | .classObj _ => return true
-  | .instance _ => return true
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some (.int 0) => return false
+    | some (.bool false) => return false
+    | some (.bytes b) => return (!b.isEmpty)
+    | some (.str s) => return (!s.isEmpty)
+    | _ => return true
   | .superObj _ _ => return true
   | .staticMethod _ => return true
   | .classMethod _ => return true
@@ -134,8 +141,14 @@ partial def valueEq (a b : Value) : InterpM Bool :=
     for i in [:a.size] do
       if !(← valueEq a[i]! b[i]!) then return false
     return true
-  -- Instance identity comparison (default Python __eq__)
-  | .instance a, .instance b => return (a == b)
+  -- Instance comparison: identity fast path, then wrappedValue, then fallback
+  | .instance a, .instance b => do
+    if a == b then return true
+    let ad ← heapGetInstanceData a
+    let bd ← heapGetInstanceData b
+    match ad.wrappedValue, bd.wrappedValue with
+    | some va, some vb => valueEq va vb
+    | _, _ => return false
   | _, _ => return false
 
 -- ============================================================
