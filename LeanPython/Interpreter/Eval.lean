@@ -145,7 +145,7 @@ private def knownIntMethods : List String :=
   ["bit_length", "to_bytes"]
 
 private def knownBytesMethods : List String :=
-  ["hex", "decode"]
+  ["hex", "decode", "join"]
 
 private def knownTupleMethods : List String :=
   ["count", "index"]
@@ -396,7 +396,7 @@ private partial def getOrCreateBuiltinTypeClass (name : String) : InterpM Value 
       "__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__",
       "__len__", "__getitem__", "__contains__", "__iter__",
       "__hash__", "__repr__", "__str__",
-      "hex", "fromhex", "decode"
+      "hex", "fromhex", "decode", "join"
     ] do
       ns := ns.insert dunder (.builtin s!"bytes.{dunder}")
   -- Create the class with object as base
@@ -1817,6 +1817,19 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             let b ← extractBytes a
             return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
           | _ => throwTypeError "bytes.decode takes at most 1 argument"
+        | "join" => match args with
+          | [sep, iter] => do
+            let sepBytes ← extractBytes sep
+            let items ← iterValuesExt iter
+            let mut result := ByteArray.empty
+            let mut first := true
+            for item in items.toList do
+              if !first then result := result ++ sepBytes
+              let b ← extractBytes item
+              result := result ++ b
+              first := false
+            return .bytes result
+          | _ => throwTypeError "bytes.join takes 1 argument"
         | _ => throwTypeError s!"bytes.{methodName} is not implemented"
       -- ============================================================
       -- functools.singledispatch dispatch and register
@@ -4324,6 +4337,25 @@ partial def callBytesMethod (b : ByteArray) (method : String) (args : List Value
     | [] => return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
     | [.str _encoding] => return .str (String.ofList (b.toList.map (fun byte => Char.ofNat byte.toNat)))
     | _ => throwTypeError "decode() takes at most 1 argument"
+  | "join" =>
+    match args with
+    | [iter] => do
+      let items ← iterValuesExt iter
+      let mut result := ByteArray.empty
+      let mut first := true
+      for item in items.toList do
+        if !first then result := result ++ b
+        match item with
+        | .bytes itemB => result := result ++ itemB
+        | .instance iref => do
+          let id_ ← heapGetInstanceData iref
+          match id_.wrappedValue with
+          | some (.bytes itemB) => result := result ++ itemB
+          | _ => throwTypeError "sequence item: expected bytes"
+        | _ => throwTypeError "sequence item: expected bytes"
+        first := false
+      return .bytes result
+    | _ => throwTypeError "join() takes exactly one argument"
   | _ => throwAttributeError s!"'bytes' object has no attribute '{method}'"
 
 -- ============================================================

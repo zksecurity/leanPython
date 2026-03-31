@@ -627,15 +627,44 @@ partial def callBuiltin (name : String) (args : List Value)
   | "tuple"      => builtinTuple args
   | "isinstance" => builtinIsinstance args
   | "issubclass" => do
+    -- Helper: get builtin type's MRO names (e.g., bool -> [bool, int, object])
+    let builtinMro (name : String) : List String :=
+      match name with
+      | "bool" => ["bool", "int", "object"]
+      | "int" => ["int", "object"]
+      | "float" => ["float", "object"]
+      | "str" => ["str", "object"]
+      | "bytes" => ["bytes", "object"]
+      | "bytearray" => ["bytearray", "object"]
+      | "list" => ["list", "object"]
+      | "tuple" => ["tuple", "object"]
+      | "dict" => ["dict", "object"]
+      | "set" => ["set", "object"]
+      | "frozenset" => ["frozenset", "object"]
+      | other => [other, "object"]
+    -- Helper: check if a class (classObj or builtin) is a subclass of a target
+    let checkSubclass (cls : Value) (target : Value) : InterpM Bool := do
+      match cls, target with
+      | .classObj aRef, .classObj _ => do
+        let cd ← heapGetClassData aRef
+        return cd.mro.any (fun m => Value.beq m target)
+      | .classObj aRef, .builtin targetName => do
+        if targetName == "object" then return true
+        let cd ← heapGetClassData aRef
+        return cd.mro.any (fun m => Value.beq m target)
+      | .builtin aName, .builtin targetName => do
+        if targetName == "object" then return true
+        return (builtinMro aName).contains targetName
+      | .builtin _aName, .classObj _ => return false
+      | _, _ => throwTypeError "issubclass() arg 1 must be a class"
     match args with
-    | [.classObj aRef, .classObj _] => do
-      let cd ← heapGetClassData aRef
+    | [cls, .tuple candidates] => do
       let mut found := false
-      for mroEntry in cd.mro do
-        if Value.beq mroEntry args[1]! then found := true; break
+      for candidate in candidates do
+        if ← checkSubclass cls candidate then found := true; break
       return .bool found
-    | [.classObj _, .builtin "object"] => return .bool true
-    | [_, _] => throwTypeError "issubclass() arg 1 must be a class"
+    | [cls, target] => do
+      return .bool (← checkSubclass cls target)
     | _ => throwTypeError "issubclass() takes 2 arguments"
   | "object" => do
     -- object() creates a base object — for now just return a plain instance

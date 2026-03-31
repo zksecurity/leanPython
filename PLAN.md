@@ -781,7 +781,7 @@ For non-deterministic tests, structural equivalence is checked.
 | 8c | Pydantic: advanced features for leanSpec | Done (extra="forbid" enforcement, alias_generator/to_camel, populate_by_name, model_dump by_alias, ConfigDict MRO inheritance, __get_pydantic_core_schema__ hook, validate_default/arbitrary_types_allowed parsing) |
 | 8d-e | Pydantic: remaining advanced features | Not started |
 | 9a | leanSpec: types | Done (built-in type subclassing, BaseUint/BaseBytes/Boolean, Container serialize/deserialize, SSZVector/SSZList, BaseBitvector encode/decode round-trip, BaseBitlist with delimiter bit encode/decode, BaseByteList variable-length byte list, f-string support, Pydantic model_fields introspection) |
-| 9b | leanSpec: SSZ merkleization | In progress (functools.singledispatch with .register implemented, bytes slicing, hash_nodes/pack_bytes/merkleize/mix_in_length pipeline, hash_tree_root for BaseUint and Container via singledispatch) |
+| 9b | leanSpec: SSZ merkleization | In progress (functools.singledispatch with .register, bytes slicing, hash_nodes/pack_bytes/merkleize/mix_in_length pipeline, pack_bits, hash_tree_root for BaseUint/Boolean/BaseBytes/BaseByteList/BaseBitvector/BaseBitlist/SSZVector/SSZList/Container via singledispatch, issubclass with tuple, bytes.join) |
 | 9c | leanSpec: consensus containers | Not started |
 | 9d | leanSpec: state transition | Not started |
 | 9e | leanSpec: fork choice | Not started |
