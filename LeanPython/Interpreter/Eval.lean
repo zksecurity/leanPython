@@ -875,6 +875,14 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         | some v => return v
         | none => callBuiltin name args kwargs
       | _ => callBuiltin name args kwargs
+    -- For iteration-based builtins, unwrap instance first arg via __iter__
+    | "enumerate" | "sorted" | "any" | "all" | "sum" | "reversed" | "list" | "tuple" | "zip" =>
+      match args with
+      | (inst@(.instance _)) :: rest => do
+        let items ← iterValuesExt inst
+        let listVal ← allocList items
+        callBuiltin name (listVal :: rest) kwargs
+      | _ => callBuiltin name args kwargs
     | "print" => do
       -- Convert instance args to strings via __str__ first
       let mut args' : List Value := []
@@ -2671,7 +2679,22 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
   | .subscript obj idx _ => do
     let objVal ← evalExpr obj
     let idxVal ← evalExpr idx
-    assignSubscriptValue objVal idxVal value
+    match objVal with
+    | .bytes b =>
+      -- bytearray-style mutation: create modified bytes and re-assign to source variable
+      match idxVal with
+      | .int i =>
+        let ni := normalizeIndex i b.size
+        if ni < 0 || ni >= b.size then throwIndexError "bytearray index out of range"
+        match value with
+        | .int v =>
+          let newB := b.set! ni.toNat v.toNat.toUInt8
+          match obj with
+          | .name n _ => setVariable n (.bytes newB)
+          | _ => throwTypeError "'bytes' does not support item assignment"
+        | _ => throwTypeError "bytearray item must be an integer"
+      | _ => throwTypeError "bytearray indices must be integers"
+    | _ => assignSubscriptValue objVal idxVal value
   | .tuple targets _ | .list_ targets _ => do
     let items ← iterValuesExt value
     -- Check for starred
@@ -2786,6 +2809,15 @@ partial def assignToTarget (target : Expr) (value : Value) : InterpM Unit := do
   | _ => throwRuntimeError (.runtimeError "invalid assignment target")
 
 partial def assignSubscriptValue (obj idx value : Value) : InterpM Unit := do
+  -- Coerce instance indices with wrappedValue to plain .int
+  let idx ← do
+    match idx with
+    | .instance iref =>
+      let id_ ← heapGetInstanceData iref
+      match id_.wrappedValue with
+      | some (.int n) => pure (.int n)
+      | _ => pure idx
+    | _ => pure idx
   match obj with
   | .list ref =>
     match idx with

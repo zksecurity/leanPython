@@ -347,6 +347,11 @@ partial def valueContains (container elem : Value) : InterpM Bool :=
     match elem with
     | .str sub => return (stringContains s sub)
     | _ => throwTypeError s!"'in <string>' requires string as left operand, not {typeName elem}"
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some inner => valueContains inner elem
+    | none => throwTypeError s!"argument of type '{typeName container}' is not iterable"
   | _ => throwTypeError s!"argument of type '{typeName container}' is not iterable"
 
 -- ============================================================
@@ -710,6 +715,11 @@ partial def iterValues (v : Value) : InterpM (Array Value) :=
     let remaining := (buf.toList.drop idx).toArray
     heapSetGeneratorIdx ref buf.size
     return remaining
+  | .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some inner => iterValues inner
+    | none => throwTypeError s!"'{typeName v}' object is not iterable"
   | .boundMethod _ _ => throwTypeError s!"'{typeName v}' object is not iterable"
   | .exception _ _ => throwTypeError s!"'{typeName v}' object is not iterable"
   | _ => throwTypeError s!"'{typeName v}' object is not iterable"
