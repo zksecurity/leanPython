@@ -517,6 +517,421 @@ decode_rlp_list ok
 error handling ok"
 
 # ============================================================
+# Subspecs layer helper: extends tier6 with full types/__init__.py + subspecs scaffolding
+setup_subspecs_koalabear() {
+  local dir="$1"
+  setup_types_dir_tier6 "$dir"
+  cp "$SRC/types/rlp.py" "$dir/lean_spec/types/"
+  # Full types/__init__.py matching real leanSpec
+  cat > "$dir/lean_spec/types/__init__.py" << 'INITEOF'
+from .constants import OFFSET_BYTE_LENGTH
+from .exceptions import SSZError, SSZTypeError, SSZValueError, SSZSerializationError
+from .base import CamelModel, StrictBaseModel
+from .ssz_base import SSZType, SSZModel
+from .uint import BaseUint, Uint8, Uint16, Uint32, Uint64
+from .boolean import Boolean
+from .container import Container
+from .byte_arrays import BaseBytes, BaseByteList, Bytes4, Bytes32, Bytes52, ZERO_HASH
+from .bitfields import BaseBitvector, BaseBitlist
+from .collections import SSZVector, SSZList
+from .union import SSZUnion
+INITEOF
+  # Subspecs scaffolding
+  mkdir -p "$dir/lean_spec/subspecs/koalabear"
+  cp "$SRC/subspecs/__init__.py" "$dir/lean_spec/subspecs/"
+  cp "$SRC/subspecs/koalabear/__init__.py" "$dir/lean_spec/subspecs/koalabear/"
+  cp "$SRC/subspecs/koalabear/field.py" "$dir/lean_spec/subspecs/koalabear/"
+}
+
+setup_subspecs_ssz_base() {
+  local dir="$1"
+  setup_subspecs_koalabear "$dir"
+  mkdir -p "$dir/lean_spec/subspecs/ssz"
+  # Shimmed __init__.py (real one imports hash.py which needs full chain)
+  echo '"""SSZ (Simple Serialize) implementation."""' > "$dir/lean_spec/subspecs/ssz/__init__.py"
+  cp "$SRC/subspecs/ssz/constants.py" "$dir/lean_spec/subspecs/ssz/"
+  cp "$SRC/subspecs/ssz/utils.py" "$dir/lean_spec/subspecs/ssz/"
+}
+
+setup_subspecs_ssz_full() {
+  local dir="$1"
+  setup_subspecs_ssz_base "$dir"
+  cp "$SRC/subspecs/ssz/pack.py" "$dir/lean_spec/subspecs/ssz/"
+  cp "$SRC/subspecs/ssz/merkleization.py" "$dir/lean_spec/subspecs/ssz/"
+}
+
+setup_subspecs_ssz_hash() {
+  local dir="$1"
+  setup_subspecs_ssz_full "$dir"
+  cp "$SRC/subspecs/ssz/hash.py" "$dir/lean_spec/subspecs/ssz/"
+  # Real __init__.py now that hash.py is available
+  cp "$SRC/subspecs/ssz/__init__.py" "$dir/lean_spec/subspecs/ssz/"
+}
+
+setup_subspecs_containers_basic() {
+  local dir="$1"
+  setup_subspecs_ssz_hash "$dir"
+  # chain/ with shimmed __init__.py (real one imports clock.py which uses asyncio)
+  mkdir -p "$dir/lean_spec/subspecs/chain"
+  cat > "$dir/lean_spec/subspecs/chain/__init__.py" << 'INITEOF'
+"""Specifications for chain and consensus parameters."""
+from .config import (
+    INTERVALS_PER_SLOT,
+    SECONDS_PER_SLOT,
+    MILLISECONDS_PER_SLOT,
+    MILLISECONDS_PER_INTERVAL,
+    HISTORICAL_ROOTS_LIMIT,
+    VALIDATOR_REGISTRY_LIMIT,
+)
+INITEOF
+  cp "$SRC/subspecs/chain/config.py" "$dir/lean_spec/subspecs/chain/"
+  # containers/ with shimmed __init__.py (real one imports xmss-dependent files)
+  mkdir -p "$dir/lean_spec/subspecs/containers"
+  cat > "$dir/lean_spec/subspecs/containers/__init__.py" << 'INITEOF'
+"""Container types for the Lean consensus specification."""
+from .checkpoint import Checkpoint
+from .config import Config
+from .slot import Slot
+INITEOF
+  cp "$SRC/subspecs/containers/slot.py" "$dir/lean_spec/subspecs/containers/"
+  cp "$SRC/subspecs/containers/checkpoint.py" "$dir/lean_spec/subspecs/containers/"
+  cp "$SRC/subspecs/containers/config.py" "$dir/lean_spec/subspecs/containers/"
+}
+
+# ============================================================
+echo "=== Tier 8: koalabear/field.py (Fp field arithmetic) ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_koalabear "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.subspecs.koalabear import Fp, P
+
+# Basic creation
+a = Fp(value=7)
+b = Fp(value=11)
+print(a.value)
+print(b.value)
+
+# Arithmetic
+c = a + b
+print(c.value)
+c = a - b
+print(c.value)   # (7 - 11) % P
+c = a * b
+print(c.value)
+c = -a
+print(c.value)   # (-7) % P
+
+# Exponentiation
+c = a ** 3
+print(c.value)   # 7^3 = 343
+
+# Inverse and division
+inv = a.inverse()
+check = a * inv
+print(check.value)   # should be 1
+
+d = b / a
+check = d * a
+print(check.value)   # should be 11
+
+# Equality and hash
+print(Fp(value=7) == Fp(value=7))
+print(Fp(value=7) == Fp(value=8))
+
+# Encode/decode round-trip
+import io
+data = a.encode_bytes()
+print(len(data))
+a2 = Fp.decode_bytes(data)
+print(a2.value)
+print(a2 == a)
+
+# two_adic_generator
+g = Fp.two_adic_generator(0)
+print(g.value)   # should be 1
+
+# TypeError on non-int
+try:
+    Fp(value=3.14)
+except TypeError:
+    print('type error ok')
+
+# Modular reduction
+big = Fp(value=P + 42)
+print(big.value)   # should be 42
+
+# Negative normalization
+neg = Fp(value=-1)
+print(neg.value)   # should be P - 1
+EOF
+run_test "koalabear Fp arithmetic" "$DIR" "main.py" "7
+11
+18
+$(python3 -c "P=2**31-2**24+1; print((7-11)%P)")
+77
+$(python3 -c "P=2**31-2**24+1; print((-7)%P)")
+343
+1
+11
+True
+False
+4
+7
+True
+1
+type error ok
+42
+$(python3 -c "P=2**31-2**24+1; print(P-1)")"
+
+# ============================================================
+echo "=== Tier 9: ssz/constants.py + ssz/utils.py ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_ssz_base "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.subspecs.ssz.constants import BYTES_PER_CHUNK, BITS_PER_BYTE, BITS_PER_CHUNK
+print(BYTES_PER_CHUNK)
+print(BITS_PER_BYTE)
+print(BITS_PER_CHUNK)
+
+from lean_spec.subspecs.ssz.utils import get_power_of_two_ceil, hash_nodes
+# Power of two ceil
+for x in [0, 1, 2, 3, 4, 31, 32, 33]:
+    print(get_power_of_two_ceil(x))
+
+# hash_nodes: SHA-256 of 64 zero bytes
+from lean_spec.types import Bytes32, ZERO_HASH
+h = hash_nodes(ZERO_HASH, ZERO_HASH)
+print(h.hex())
+EOF
+run_test "ssz constants + utils" "$DIR" "main.py" "32
+8
+256
+1
+1
+2
+4
+4
+32
+32
+64
+$(python3 -c "import hashlib; print(hashlib.sha256(b'\x00'*64).hexdigest())")"
+
+# ============================================================
+echo "=== Tier 10: ssz/pack.py + ssz/merkleization.py ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_ssz_full "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.subspecs.ssz.pack import pack_bytes, pack_bits
+from lean_spec.subspecs.ssz.merkleization import merkleize, mix_in_length
+from lean_spec.types import ZERO_HASH, Bytes32
+
+# pack_bytes: 8 bytes -> 1 chunk (padded to 32)
+chunks = pack_bytes(b'\x01\x02\x03\x04\x05\x06\x07\x08')
+print(len(chunks))
+
+# pack_bytes: 32 bytes -> 1 chunk (exact)
+chunks = pack_bytes(b'\x00' * 32)
+print(len(chunks))
+print(chunks[0] == ZERO_HASH)
+
+# pack_bytes: 33 bytes -> 2 chunks
+chunks = pack_bytes(b'\x00' * 33)
+print(len(chunks))
+
+# pack_bits: 8 bools
+chunks = pack_bits([True, False, True, False, False, False, False, False])
+print(len(chunks))
+# First byte should be 0b00000101 = 5, rest zeros
+print(chunks[0][0])
+
+# merkleize: single chunk = identity
+single = Bytes32(b'\x42' + b'\x00' * 31)
+root = merkleize([single])
+print(root[0])
+
+# merkleize: empty = ZERO_HASH
+root = merkleize([])
+print(root == ZERO_HASH)
+
+# mix_in_length
+root = mix_in_length(ZERO_HASH, 0)
+print(root == merkleize([ZERO_HASH, Bytes32(b'\x00' * 32)]))
+
+# Module-level _ZERO_HASHES precompute works (import succeeded = pass)
+print('merkleization ok')
+EOF
+run_test "ssz pack + merkleization" "$DIR" "main.py" "1
+1
+True
+2
+1
+5
+66
+True
+True
+merkleization ok"
+
+# ============================================================
+echo "=== Tier 11: ssz/hash.py (hash_tree_root via singledispatch) ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_ssz_hash "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.subspecs.ssz import hash_tree_root
+from lean_spec.types import Uint64, Boolean, Bytes32, Container, SSZVector, SSZList, ZERO_HASH
+from lean_spec.subspecs.koalabear import Fp
+
+# hash_tree_root(Uint64)
+h = hash_tree_root(Uint64(42))
+print(h.hex())
+
+# hash_tree_root(Boolean)
+h = hash_tree_root(Boolean(True))
+print(h.hex())
+
+# hash_tree_root(Bytes32) -- ZERO_HASH
+h = hash_tree_root(ZERO_HASH)
+print(h.hex())
+
+# hash_tree_root(Fp)
+h = hash_tree_root(Fp(value=7))
+print(h.hex())
+
+# hash_tree_root(Container)
+class Point(Container):
+    x: Uint64
+    y: Uint64
+
+p = Point(x=Uint64(1), y=Uint64(2))
+h = hash_tree_root(p)
+print(h.hex())
+
+# hash_tree_root(SSZVector)
+class Vec3(SSZVector):
+    ELEMENT_TYPE = Uint64
+    LENGTH = 3
+
+v = Vec3(data=[Uint64(10), Uint64(20), Uint64(30)])
+h = hash_tree_root(v)
+print(h.hex())
+
+# hash_tree_root(SSZList)
+class List5(SSZList):
+    ELEMENT_TYPE = Uint64
+    LIMIT = 5
+
+l = List5(data=[Uint64(100)])
+h = hash_tree_root(l)
+print(h.hex())
+
+print('hash_tree_root ok')
+EOF
+
+# Generate expected hashes from CPython
+EXPECTED=$(python3 << 'PYEOF'
+import sys, os
+sys.path.insert(0, "references/leanSpec/src")
+from lean_spec.subspecs.ssz import hash_tree_root
+from lean_spec.types import Uint64, Boolean, Bytes32, Container, SSZVector, SSZList, ZERO_HASH
+from lean_spec.subspecs.koalabear import Fp
+
+print(hash_tree_root(Uint64(42)).hex())
+print(hash_tree_root(Boolean(True)).hex())
+print(hash_tree_root(ZERO_HASH).hex())
+print(hash_tree_root(Fp(value=7)).hex())
+
+class Point(Container):
+    x: Uint64
+    y: Uint64
+print(hash_tree_root(Point(x=Uint64(1), y=Uint64(2))).hex())
+
+class Vec3(SSZVector):
+    ELEMENT_TYPE = Uint64
+    LENGTH = 3
+print(hash_tree_root(Vec3(data=[Uint64(10), Uint64(20), Uint64(30)])).hex())
+
+class List5(SSZList):
+    ELEMENT_TYPE = Uint64
+    LIMIT = 5
+print(hash_tree_root(List5(data=[Uint64(100)])).hex())
+
+print('hash_tree_root ok')
+PYEOF
+)
+run_test "ssz hash_tree_root singledispatch" "$DIR" "main.py" "$EXPECTED"
+
+# ============================================================
+echo "=== Tier 12: chain/config + containers (Slot, Checkpoint, Config) ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_containers_basic "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+# chain/config constants
+from lean_spec.subspecs.chain.config import (
+    SECONDS_PER_SLOT, MILLISECONDS_PER_SLOT,
+    VALIDATOR_REGISTRY_LIMIT, INTERVALS_PER_SLOT,
+)
+from lean_spec.types import Uint64
+print(int(SECONDS_PER_SLOT))
+print(int(MILLISECONDS_PER_SLOT))
+print(int(VALIDATOR_REGISTRY_LIMIT))
+print(int(INTERVALS_PER_SLOT))
+
+# Slot
+from lean_spec.subspecs.containers.slot import Slot
+s = Slot(10)
+print(int(s))
+# is_justifiable_after: delta=1 (<=5, always justifiable)
+print(s.is_justifiable_after(Slot(9)))
+# is_justifiable_after: delta=9 (perfect square)
+print(Slot(9).is_justifiable_after(Slot(0)))
+# is_justifiable_after: delta=6 (pronic number 2*3)
+print(Slot(6).is_justifiable_after(Slot(0)))
+# is_justifiable_after: delta=7 (not justifiable)
+print(Slot(7).is_justifiable_after(Slot(0)))
+# justified_index_after
+print(s.justified_index_after(Slot(7)))
+
+# Checkpoint
+from lean_spec.subspecs.containers.checkpoint import Checkpoint
+from lean_spec.types import Bytes32
+cp = Checkpoint(root=Bytes32.zero(), slot=Slot(42))
+print(int(cp.slot))
+print(cp.root == Bytes32.zero())
+data = cp.encode_bytes()
+print(len(data))
+cp2 = Checkpoint.decode_bytes(data)
+print(cp2 == cp)
+
+# Config
+from lean_spec.subspecs.containers.config import Config
+cfg = Config(genesis_time=Uint64(1704085200))
+print(int(cfg.genesis_time))
+data = cfg.encode_bytes()
+cfg2 = Config.decode_bytes(data)
+print(cfg2 == cfg)
+EOF
+run_test "chain config + Slot + Checkpoint + Config" "$DIR" "main.py" "4
+4000
+4096
+5
+10
+True
+True
+True
+False
+2
+42
+True
+40
+True
+1704085200
+True"
+
+# ============================================================
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1

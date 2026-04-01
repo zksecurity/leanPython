@@ -1751,6 +1751,14 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             let i : Int := if idx < 0 then (b.size : Int) + idx else idx
             if i < 0 || i >= b.size then throwTypeError "index out of range"
             return .int (b[i.toNat]!.toNat : Int)
+          | [a, .tuple #[start, stop, step]] => do
+            let b ← extractBytes a
+            let (st, en, stp) ← computeSliceIndices b.size (some start) (some stop) (some step)
+            let indices := sliceIndices st en stp
+            let mut result := ByteArray.empty
+            for i in indices do
+              if i < b.size then result := result.push b[i]!
+            return .bytes result
           | _ => throwTypeError "bytes.__getitem__ takes 2 arguments"
         | "__contains__" => match args with
           | [a, .int byte_] => do
@@ -2757,7 +2765,8 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
   | .builtin name =>
     -- Allow subscripting on builtin type names for type annotations (list[int], dict[str, int], etc.)
     match name with
-    | "list" | "dict" | "set" | "tuple" | "frozenset" | "type" => return .none
+    | "list" | "dict" | "set" | "tuple" | "frozenset" | "type"
+    | "memoryview" | "complex" => return .none
     | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
   | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
 

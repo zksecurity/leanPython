@@ -350,6 +350,7 @@ def builtinNames : List String :=
    "hex", "oct", "bin", "round", "pow", "divmod", "map", "filter",
    "iter", "next", "hasattr", "getattr", "setattr", "callable",
    "issubclass", "super", "object", "bytes", "bytearray",
+   "memoryview", "frozenset", "complex",
    "staticmethod", "classmethod", "property",
    -- Dataclass
    "dataclass",
