@@ -8,6 +8,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Checkout leanSpec submodule
+        run: git submodule update --init references/leanSpec
       - uses: leanprover/lean-action@v1
         with:
           test: true
