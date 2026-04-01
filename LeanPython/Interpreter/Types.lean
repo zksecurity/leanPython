@@ -336,6 +336,7 @@ def typeName : Value → String
   | .boundMethod _ _ => "method"
   | .exception tn _ => tn
   | .generator _ => "generator"
+  | .coroutine _ => "coroutine"
   | .classObj _ => "type"
   | .instance _ => "instance"
   | .superObj _ _ => "super"

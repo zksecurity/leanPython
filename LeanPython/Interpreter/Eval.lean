@@ -620,7 +620,7 @@ partial def evalExpr (e : Expr) : InterpM Value := do
     let defMod := match st.globalScope["__name__"]? with
       | some (.str n) => if n == "__main__" then none else some n
       | _ => none
-    allocFunc (FuncData.mk "<lambda>" params [.return_ (some body) dummySpan] defaults.toArray kwDefaults.toArray st.localScopes.toArray false defMod)
+    allocFunc (FuncData.mk "<lambda>" params [.return_ (some body) dummySpan] defaults.toArray kwDefaults.toArray st.localScopes.toArray false defMod false)
 
   | .tuple elems _ => do
     let vals ← elems.mapM evalExpr
@@ -712,7 +712,11 @@ partial def evalExpr (e : Expr) : InterpM Value := do
     results ← evalCompGen generators (do return (← evalExpr elt)) results
     allocGenerator results
 
-  | .await_ _ _ => throwNotImplemented "await"
+  | .await_ expr _ => do
+    let v ← evalExpr expr
+    match v with
+    | .coroutine inner => return inner
+    | other => return other
   | .yield_ exprOpt _ => do
     let v ← match exprOpt with
       | some expr => evalExpr expr
@@ -2362,10 +2366,13 @@ partial def callValueDispatch (callee : Value) (args : List Value)
 partial def callUserFunc (fd : FuncData) (args : List Value)
     (kwargs : List (String × Value)) : InterpM Value := do
   let scope ← bindFuncParams fd.params args kwargs fd.defaults fd.kwDefaults
-  if fd.isGenerator then
-    callGeneratorFunc fd scope
+  let result ←
+    if fd.isGenerator then callGeneratorFunc fd scope
+    else callRegularFunc fd scope
+  if fd.isAsync && !fd.isGenerator then
+    return .coroutine result
   else
-    callRegularFunc fd scope
+    return result
 
 -- Call a regular (non-generator) function
 partial def callRegularFunc (fd : FuncData) (scope : Scope) : InterpM Value := do
@@ -3553,6 +3560,34 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     ns := ns.insert "plain_serializer_function_ser_schema"
       (.builtin "core_schema.plain_serializer_function_ser_schema")
     some <$> mkMod ns
+  | "asyncio" => do
+    let mut ns : Std.HashMap String Value := {}
+    -- Functions
+    ns := ns.insert "sleep" (.builtin "asyncio.sleep")
+    ns := ns.insert "run" (.builtin "asyncio.run")
+    ns := ns.insert "gather" (.builtin "asyncio.gather")
+    ns := ns.insert "create_task" (.builtin "asyncio.create_task")
+    ns := ns.insert "wait_for" (.builtin "asyncio.wait_for")
+    ns := ns.insert "ensure_future" (.builtin "asyncio.ensure_future")
+    ns := ns.insert "get_running_loop" (.builtin "asyncio.get_running_loop")
+    ns := ns.insert "get_event_loop" (.builtin "asyncio.get_event_loop")
+    ns := ns.insert "new_event_loop" (.builtin "asyncio.new_event_loop")
+    ns := ns.insert "iscoroutinefunction" (.builtin "asyncio.iscoroutinefunction")
+    ns := ns.insert "iscoroutine" (.builtin "asyncio.iscoroutine")
+    -- Exception classes (registered as builtins so raise/except works)
+    ns := ns.insert "CancelledError" (.builtin "CancelledError")
+    ns := ns.insert "TimeoutError" (.builtin "TimeoutError")
+    -- Stub classes
+    for className in ["Queue", "Event", "Lock", "TaskGroup", "Future", "Task",
+                       "DatagramTransport", "DatagramProtocol"] do
+      let cls ← allocClassObj {
+        name := className, bases := #[], mro := #[], ns := {} }
+      match cls with
+      | .classObj ref => heapSetClassData ref {
+          name := className, bases := #[], mro := #[cls], ns := {} }
+      | _ => pure ()
+      ns := ns.insert className cls
+    some <$> mkMod ns
   | _ => return none
 
 /-- Load a module by fully-qualified name and file path.
@@ -3808,7 +3843,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     let defMod := match st.globalScope["__name__"]? with
       | some (.str n) => if n == "__main__" then none else some n
       | _ => none
-    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body) defMod)
+    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body) defMod false)
     -- Apply decorators (innermost first = reverse the list)
     let mut decorated := funcVal
     for dec in fd.decoratorList.reverse do
@@ -3817,7 +3852,6 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     setVariable fd.name decorated
 
   | .asyncFunctionDef fd => do
-    -- Treat async as regular for now
     let defaults ← fd.args.defaults.mapM evalExpr
     let kwDefaults ← fd.args.kwDefaults.mapM fun
       | some e => do return some (← evalExpr e)
@@ -3826,7 +3860,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
     let defMod := match st.globalScope["__name__"]? with
       | some (.str n) => if n == "__main__" then none else some n
       | _ => none
-    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body) defMod)
+    let funcVal ← allocFunc (FuncData.mk fd.name fd.args fd.body defaults.toArray kwDefaults.toArray st.localScopes.toArray (stmtsContainYield fd.body) defMod (isAsync := true))
     -- Apply decorators
     let mut decorated := funcVal
     for dec in fd.decoratorList.reverse do
@@ -4046,7 +4080,7 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
           | "OverflowError" => RuntimeError.overflowError msg
           | "StopIteration" => RuntimeError.stopIteration
           | "NotImplementedError" => RuntimeError.notImplemented msg
-          | _ => RuntimeError.runtimeError msg
+          | other => RuntimeError.customError other msg []
         throwRuntimeError err
       | .builtin name =>
         -- raise ValueError (no args)
@@ -4274,7 +4308,62 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       | other => throw other
     if !brokeOut then execStmts orelse
 
-  | .asyncWith _items _body _ => throwNotImplemented "async with"
+  | .asyncWith items body _ => do
+    let getAttr := fun (obj : Value) (name : String) => do
+      try
+        let v ← getAttributeValue obj name
+        return some v
+      catch
+      | .error (.attributeError _) => return (none : Option Value)
+      | other => throw other
+    let unwrapCoro := fun (v : Value) =>
+      match v with
+      | .coroutine inner => inner
+      | other => other
+    let mut managers : List (Value × Value) := []
+    for item in items do
+      let mgr ← evalExpr item.contextExpr
+      let enterFn ← match ← getAttr mgr "__aenter__" with
+        | some fn => pure (some fn)
+        | none => getAttr mgr "__enter__"
+      let entered ← match enterFn with
+        | some fn => do
+          let v ← callValueDispatch fn [mgr] []
+          pure (unwrapCoro v)
+        | none => pure mgr
+      if let some target := item.optionalVars then
+        assignToTarget target entered
+      managers := managers ++ [(mgr, entered)]
+    let mut bodyError : Option Signal := none
+    try execStmts body
+    catch
+    | sig@(.error _) => bodyError := some sig
+    | other => do
+      for (mgr, _) in managers.reverse do
+        let exitFn ← match ← getAttr mgr "__aexit__" with
+          | some fn => pure (some fn)
+          | none => getAttr mgr "__exit__"
+        if let some fn := exitFn then
+          let _ ← callValueDispatch fn [mgr, .none, .none, .none] []
+      throw other
+    let mut suppressed := false
+    for (mgr, _) in managers.reverse do
+      let exitFn ← match ← getAttr mgr "__aexit__" with
+        | some fn => pure (some fn)
+        | none => getAttr mgr "__exit__"
+      if let some fn := exitFn then
+        let exitArgs := match bodyError with
+          | none => [mgr, .none, .none, .none]
+          | some (.error e) =>
+            let excType := Value.str (runtimeErrorTypeName e)
+            let excVal := Value.exception (runtimeErrorTypeName e) (runtimeErrorMessage e)
+            [mgr, excType, excVal, .none]
+          | _ => [mgr, .none, .none, .none]
+        let result ← callValueDispatch fn exitArgs []
+        if ← isTruthy result then suppressed := true
+    match bodyError with
+    | some sig => if !suppressed then throw sig
+    | none => return
 
   | .match_ subject cases _ => do
     let subjectVal ← evalExpr subject
@@ -5490,7 +5579,7 @@ partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
       let defaults := fieldsWithDefaults.filterMap fun (_, d) => d
       let args := Arguments.mk [] (selfArg :: paramArgs) none [] [] none
         (defaults.map fun v => Expr.constant (valueToConstant v) dummySpan)
-      let fd := FuncData.mk "__init__" args bodyStmts defaults.toArray #[] #[] false none
+      let fd := FuncData.mk "__init__" args bodyStmts defaults.toArray #[] #[] false none false
       let initVal ← allocFunc fd
       nsUpdated := nsUpdated.insert "__init__" initVal
     -- Generate __repr__ if not already defined
@@ -5512,7 +5601,7 @@ partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
         fieldIdx := fieldIdx + 1
       reprExpr := Expr.binOp reprExpr .add (Expr.constant (.string ")") dummySpan) dummySpan
       let bodyStmts := [Stmt.return_ (some reprExpr) dummySpan]
-      let fd := FuncData.mk "__repr__" args bodyStmts #[] #[] #[] false none
+      let fd := FuncData.mk "__repr__" args bodyStmts #[] #[] #[] false none false
       let reprVal ← allocFunc fd
       nsUpdated := nsUpdated.insert "__repr__" reprVal
     -- Generate __eq__ if not already defined
@@ -5534,7 +5623,7 @@ partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
         | [single] => single
         | _ => Expr.boolOp .and_ comparisons dummySpan
       let bodyStmts := [Stmt.return_ (some bodyExpr) dummySpan]
-      let fd := FuncData.mk "__eq__" args bodyStmts #[] #[] #[] false none
+      let fd := FuncData.mk "__eq__" args bodyStmts #[] #[] #[] false none false
       let eqVal ← allocFunc fd
       nsUpdated := nsUpdated.insert "__eq__" eqVal
     -- Apply frozen: add __setattr__ and __delattr__ that raise
@@ -5548,7 +5637,7 @@ partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
         (some (Expr.call (Expr.name "AttributeError" dummySpan)
           [Expr.constant (.string "cannot assign to field") dummySpan] [] dummySpan))
         none dummySpan]
-      let frozenSetFd := FuncData.mk "__setattr__" frozenSetArgs frozenSetBody #[] #[] #[] false none
+      let frozenSetFd := FuncData.mk "__setattr__" frozenSetArgs frozenSetBody #[] #[] #[] false none false
       let frozenSetVal ← allocFunc frozenSetFd
       nsUpdated := nsUpdated.insert "__setattr__" frozenSetVal
       -- __delattr__ that raises
@@ -5557,7 +5646,7 @@ partial def applyDataclass (cls : Value) (frozen : Bool) (useSlots : Bool)
         (some (Expr.call (Expr.name "AttributeError" dummySpan)
           [Expr.constant (.string "cannot delete field") dummySpan] [] dummySpan))
         none dummySpan]
-      let frozenDelFd := FuncData.mk "__delattr__" delArgs frozenDelBody #[] #[] #[] false none
+      let frozenDelFd := FuncData.mk "__delattr__" delArgs frozenDelBody #[] #[] #[] false none false
       let frozenDelVal ← allocFunc frozenDelFd
       nsUpdated := nsUpdated.insert "__delattr__" frozenDelVal
     -- Apply slots
@@ -5934,7 +6023,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
     let fieldsWithDefaults := allFields.filterMap fun (_, d) => d
     let args := Arguments.mk [] (selfArg :: paramArgs) none [] [] none
       (fieldsWithDefaults.map fun v => Expr.constant (valueToConstant v) dummySpan)
-    let fd := FuncData.mk "__init__" args bodyStmts fieldsWithDefaults.toArray #[] #[] false none
+    let fd := FuncData.mk "__init__" args bodyStmts fieldsWithDefaults.toArray #[] #[] false none false
     let initVal ← allocFunc fd
     nsUpdated := nsUpdated.insert "__init__" initVal
   -- 9. Generate __repr__ if not already defined
@@ -5953,7 +6042,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
       fieldIdx := fieldIdx + 1
     reprExpr := Expr.binOp reprExpr .add (Expr.constant (.string ")") dummySpan) dummySpan
     let bodyStmts := [Stmt.return_ (some reprExpr) dummySpan]
-    let fd := FuncData.mk "__repr__" args bodyStmts #[] #[] #[] false none
+    let fd := FuncData.mk "__repr__" args bodyStmts #[] #[] #[] false none false
     let reprVal ← allocFunc fd
     nsUpdated := nsUpdated.insert "__repr__" reprVal
   -- 10. Generate __eq__ if not already defined
@@ -5973,7 +6062,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
       | [single] => single
       | _ => Expr.boolOp .and_ comparisons dummySpan
     let bodyStmts := [Stmt.return_ (some bodyExpr) dummySpan]
-    let fd := FuncData.mk "__eq__" args bodyStmts #[] #[] #[] false none
+    let fd := FuncData.mk "__eq__" args bodyStmts #[] #[] #[] false none false
     let eqVal ← allocFunc fd
     nsUpdated := nsUpdated.insert "__eq__" eqVal
   -- 11. Generate __hash__ for frozen models
@@ -5986,7 +6075,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
     let tupleExpr := Expr.tuple fieldExprs dummySpan
     let hashExpr := Expr.call (Expr.name "hash" dummySpan) [tupleExpr] [] dummySpan
     let bodyStmts := [Stmt.return_ (some hashExpr) dummySpan]
-    let fd := FuncData.mk "__hash__" args bodyStmts #[] #[] #[] false none
+    let fd := FuncData.mk "__hash__" args bodyStmts #[] #[] #[] false none false
     let hashVal ← allocFunc fd
     nsUpdated := nsUpdated.insert "__hash__" hashVal
   -- 12. Apply frozen: add __setattr__ and __delattr__ that raise
@@ -5999,7 +6088,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
       (some (Expr.call (Expr.name "AttributeError" dummySpan)
         [Expr.constant (.string "Instance is frozen") dummySpan] [] dummySpan))
       none dummySpan]
-    let frozenSetFd := FuncData.mk "__setattr__" frozenSetArgs frozenSetBody #[] #[] #[] false none
+    let frozenSetFd := FuncData.mk "__setattr__" frozenSetArgs frozenSetBody #[] #[] #[] false none false
     let frozenSetVal ← allocFunc frozenSetFd
     nsUpdated := nsUpdated.insert "__setattr__" frozenSetVal
     let delArgs := Arguments.mk [] [selfArg, nameArg] none [] [] none []
@@ -6007,7 +6096,7 @@ partial def applyPydanticModelProcessing (_classVal : Value) (cref : HeapRef)
       (some (Expr.call (Expr.name "AttributeError" dummySpan)
         [Expr.constant (.string "Instance is frozen") dummySpan] [] dummySpan))
       none dummySpan]
-    let frozenDelFd := FuncData.mk "__delattr__" delArgs frozenDelBody #[] #[] #[] false none
+    let frozenDelFd := FuncData.mk "__delattr__" delArgs frozenDelBody #[] #[] #[] false none false
     let frozenDelVal ← allocFunc frozenDelFd
     nsUpdated := nsUpdated.insert "__delattr__" frozenDelVal
   -- 13. Update the class data

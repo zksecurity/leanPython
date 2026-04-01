@@ -15,6 +15,7 @@ import LeanPython.Stdlib.Datetime
 import LeanPython.Stdlib.Pathlib
 import LeanPython.Stdlib.Logging
 import LeanPython.Stdlib.Pydantic
+import LeanPython.Stdlib.Asyncio
 
 set_option autoImplicit false
 
@@ -35,6 +36,7 @@ open LeanPython.Stdlib.Sys
 open LeanPython.Stdlib.Os
 open LeanPython.Stdlib.Time
 open LeanPython.Stdlib.Logging
+open LeanPython.Stdlib.Asyncio
 
 -- ============================================================
 -- Helpers
@@ -835,7 +837,8 @@ partial def callBuiltin (name : String) (args : List Value)
   | "AttributeError" | "OverflowError" | "StopIteration"
   | "NotImplementedError" | "Exception" | "BaseException"
   | "NameError" | "OSError" | "IOError" | "FileNotFoundError"
-  | "ImportError" | "ModuleNotFoundError" => do
+  | "ImportError" | "ModuleNotFoundError"
+  | "CancelledError" | "TimeoutError" => do
     let msg ← match args with
       | [] => pure ""
       | [v] => valueToStr v
@@ -1123,6 +1126,28 @@ partial def callBuiltin (name : String) (args : List Value)
   | "tempfile.mkdtemp" => do
     let suffix ← (IO.rand 100000 999999 : IO Nat)
     return .str s!"/tmp/leanpy_{suffix}"
+  -- ============================================================
+  -- asyncio module functions
+  -- ============================================================
+  | "asyncio.sleep" => asyncioSleep args
+  | "asyncio.run" => asyncioRun args
+  | "asyncio.gather" => asyncioGather args
+  | "asyncio.create_task" => asyncioCreateTask args
+  | "asyncio.wait_for" => asyncioWaitFor args kwargs
+  | "asyncio.ensure_future" => asyncioEnsureFuture args
+  | "asyncio.get_running_loop" => return .none
+  | "asyncio.get_event_loop" => return .none
+  | "asyncio.new_event_loop" => return .none
+  | "asyncio.iscoroutinefunction" =>
+    match args with
+    | [.function ref] => do
+      let fd ← heapGetFunc ref
+      return .bool fd.isAsync
+    | _ => return .bool false
+  | "asyncio.iscoroutine" =>
+    match args with
+    | [.coroutine _] => return .bool true
+    | _ => return .bool false
   | _ => throwNotImplemented s!"builtin '{name}' is not implemented"
 
 end LeanPython.Runtime.Builtins

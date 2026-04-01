@@ -38,6 +38,7 @@ inductive Value where
   | boundMethod : Value → String → Value
   | exception   : String → String → Value
   | generator   : HeapRef → Value
+  | coroutine   : Value → Value
   | classObj    : HeapRef → Value
   | instance    : HeapRef → Value
   | superObj    : Value → Value → Value
@@ -73,6 +74,7 @@ structure FuncData where
   closure    : ClosureEnv
   isGenerator : Bool
   definingModule : Option String := none
+  isAsync : Bool := false
 
 -- ============================================================
 -- Class and instance data (stored on the heap)
@@ -186,6 +188,7 @@ partial def Value.beq : Value → Value → Bool
   | _, .boundMethod _ _ => false
   | .exception a1 a2, .exception b1 b2 => a1 == b1 && a2 == b2
   | .generator a, .generator b => a == b
+  | .coroutine a, .coroutine b => Value.beq a b
   | .classObj a, .classObj b => a == b
   | .instance a, .instance b => a == b
   | .superObj _ _, _ => false
@@ -245,6 +248,7 @@ partial def Value.toStr : Value → String
   | .ellipsis => "Ellipsis"
   | .boundMethod _ method => s!"<bound method {method}>"
   | .generator _ => "<generator object>"
+  | .coroutine _ => "<coroutine object>"
   | .classObj _ => "<class>"
   | .instance _ => "<instance>"
   | .superObj _ _ => "<super>"
@@ -276,6 +280,7 @@ partial def Value.toRepr : Value → String
   | .boundMethod _ method => s!"<bound method {method}>"
   | .exception typeName msg => if msg.isEmpty then typeName else s!"{typeName}('{msg}')"
   | .generator _ => "<generator object>"
+  | .coroutine _ => "<coroutine object>"
   | .classObj _ => "<class>"
   | .instance _ => "<instance>"
   | .superObj _ _ => "<super>"
@@ -361,7 +366,8 @@ def builtinNames : List String :=
    "NotImplementedError", "Exception", "BaseException",
    "NameError", "OSError", "IOError", "FileNotFoundError",
    "ImportError", "ModuleNotFoundError", "SystemExit",
-   "KeyboardInterrupt", "GeneratorExit"]
+   "KeyboardInterrupt", "GeneratorExit",
+   "CancelledError", "TimeoutError"]
 
 /-- Check if a name is a built-in function. -/
 def isBuiltinName (name : String) : Bool :=
@@ -379,6 +385,7 @@ def isBuiltinExceptionName (name : String) : Bool :=
   name == "OSError" || name == "IOError" ||
   name == "FileNotFoundError" || name == "ImportError" ||
   name == "ModuleNotFoundError" || name == "SystemExit" ||
-  name == "KeyboardInterrupt" || name == "GeneratorExit"
+  name == "KeyboardInterrupt" || name == "GeneratorExit" ||
+  name == "CancelledError" || name == "TimeoutError"
 
 end LeanPython.Runtime

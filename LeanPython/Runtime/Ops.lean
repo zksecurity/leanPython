@@ -98,6 +98,7 @@ partial def isTruthy (v : Value) : InterpM Bool :=
   | .boundMethod _ _ => return true
   | .exception _ _ => return true
   | .generator _ => return true
+  | .coroutine _ => return true
   | .classObj _ => return true
   | .instance iref => do
     let id_ ← heapGetInstanceData iref
@@ -213,6 +214,7 @@ partial def valueToStr (v : Value) : InterpM String :=
   | .boundMethod _ method => return s!"<bound method {method}>"
   | .exception _typeName msg => return msg
   | .generator _ => return "<generator object>"
+  | .coroutine _ => return "<coroutine object>"
   | .classObj ref => do
     let cd ← heapGetClassData ref
     return s!"<class '{cd.name}'>"
