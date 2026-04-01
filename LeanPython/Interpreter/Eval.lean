@@ -2754,6 +2754,11 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
     match cd.ns["__class_getitem__"]? with
     | some fn => callValueDispatch fn [idx] []
     | none => return .none  -- default: subscripting a class returns .none (for typing)
+  | .builtin name =>
+    -- Allow subscripting on builtin type names for type annotations (list[int], dict[str, int], etc.)
+    match name with
+    | "list" | "dict" | "set" | "tuple" | "frozenset" | "type" => return .none
+    | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
   | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
 
 -- Assignment target resolution
@@ -2979,30 +2984,37 @@ partial def getBuiltinModule (name : String) : InterpM (Option Value) := do
     -- Stub common typing names as none so imports don't fail
     for n in ["Any", "Optional", "List", "Dict", "Set", "Tuple", "FrozenSet",
               "Self", "Union", "Callable", "Protocol",
-              "runtime_checkable", "NamedTuple",
+              "NamedTuple",
               "NoReturn", "SupportsInt", "SupportsIndex",
               "TypeAlias", "Literal", "IO", "Sequence", "Mapping",
               "Iterator", "Iterable", "Generator", "Coroutine",
               "Awaitable", "AsyncIterator", "AsyncGenerator",
               "Type", "Generic", "Annotated",
-              "overload", "cast", "no_type_check"] do
+              "no_type_check"] do
       ns := ns.insert n .none
     -- ClassVar and Final are distinct markers (not .none) so Pydantic can skip them
     ns := ns.insert "ClassVar" (.builtin "typing.ClassVar")
     ns := ns.insert "Final" (.builtin "typing.Final")
     -- TypeVar is callable (returns .none as a stub type variable)
     ns := ns.insert "TypeVar" (.builtin "typing.TypeVar")
-    -- override is a callable identity decorator (not .none)
+    -- Identity decorators (return their argument unchanged)
     ns := ns.insert "override" (.builtin "typing.override")
+    ns := ns.insert "overload" (.builtin "typing.overload")
+    ns := ns.insert "runtime_checkable" (.builtin "typing.runtime_checkable")
+    -- cast(type, value) returns the value unchanged
+    ns := ns.insert "cast" (.builtin "typing.cast")
     some <$> mkMod ns
   | "typing_extensions" =>
     -- Alias for typing for compatibility
     let mut ns : Std.HashMap String Value := {}
     ns := ns.insert "TYPE_CHECKING" (.bool false)
-    for n in ["Self", "Protocol", "runtime_checkable",
+    for n in ["Self", "Protocol",
               "Annotated", "TypeAlias", "get_type_hints"] do
       ns := ns.insert n .none
     ns := ns.insert "override" (.builtin "typing.override")
+    ns := ns.insert "overload" (.builtin "typing.overload")
+    ns := ns.insert "runtime_checkable" (.builtin "typing.runtime_checkable")
+    ns := ns.insert "cast" (.builtin "typing.cast")
     some <$> mkMod ns
   | "abc" => do
     -- Create real ABC base class
@@ -3740,6 +3752,30 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
       let cd' ← heapGetClassData cref
       heapSetClassData cref { cd' with mro := mro }
     | _ => pure ()
+    -- Call __init_subclass__ on each direct base class (Python semantics)
+    for base in bases do
+      match base with
+      | .classObj bref => do
+        let bcd ← heapGetClassData bref
+        match bcd.ns["__init_subclass__"]? with
+        | some fn => do
+          -- __init_subclass__ is a classmethod; call with the new class as cls
+          let actualFn := match fn with
+            | .classMethod inner => inner
+            | other => other
+          -- Inject __class__ into the function's scope for super() support
+          match actualFn with
+          | .function fref => do
+            let fd ← heapGetFunc fref
+            let scope ← bindFuncParams fd.params [classVal] [] fd.defaults fd.kwDefaults
+            let scopeWithClass := scope.insert "__class__" base
+            let _ ← callRegularFunc fd scopeWithClass
+            pure ()
+          | _ =>
+            let _ ← callValueDispatch actualFn [classVal] []
+            pure ()
+        | none => pure ()
+      | _ => pure ()
     -- Post-process Pydantic BaseModel subclasses
     let isPydanticModel ← isBaseModelSubclass bases.toArray
     if isPydanticModel then
@@ -4165,14 +4201,28 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
     let args' ← if kwargs.isEmpty then pure args else
       match method with
       | "to_bytes" =>
-        let length := kwargs.find? (·.1 == "length") |>.map (·.2) |>.getD (.int 1)
-        let byteorder := kwargs.find? (·.1 == "byteorder") |>.map (·.2) |>.getD (.str "big")
-        pure (args ++ [length, byteorder])
+        -- Support: .to_bytes(length, byteorder), .to_bytes(length, byteorder=...), .to_bytes(byteorder=..., length=...)
+        let posLength := args.head?
+        let length := posLength.orElse fun _ => (kwargs.find? (·.1 == "length") |>.map (·.2))
+        let posByteorder := if args.length > 1 then args.tail.head? else none
+        let byteorder := posByteorder.orElse fun _ => (kwargs.find? (·.1 == "byteorder") |>.map (·.2))
+        pure [length.getD (.int 1), byteorder.getD (.str "big")]
       | _ => pure args
     callIntMethod n method args'
   | .bytes b => callBytesMethod b method args
   | .tuple arr => callTupleMethod arr method args
-  | .builtin name => callBuiltinTypeMethod name method args
+  | .builtin name => do
+    -- Convert kwargs to positional for builtin type methods
+    let args' ← if kwargs.isEmpty then pure args else
+      match name, method with
+      | "int", "from_bytes" =>
+        let posBytes := args.head?
+        let bytes_ := posBytes.orElse fun _ => (kwargs.find? (·.1 == "bytes") |>.map (·.2))
+        let posByteorder := if args.length > 1 then args.tail.head? else none
+        let byteorder := posByteorder.orElse fun _ => (kwargs.find? (·.1 == "byteorder") |>.map (·.2))
+        pure [bytes_.getD (.bytes ByteArray.empty), byteorder.getD (.str "big")]
+      | _, _ => pure args
+    callBuiltinTypeMethod name method args'
   | .generator ref => callGeneratorMethod ref method args
   | .property getter setter deleter =>
     match method with
@@ -4328,7 +4378,10 @@ partial def callBoundMethod (receiver : Value) (method : String) (args : List Va
           -- Builtins in synthetic type classes: prepend inst (self/cls)
           callValueDispatch fn (inst :: args) kwargs
         | _ => callValueDispatch fn (inst :: args) kwargs
-      | none => throwAttributeError s!"'super' object has no attribute '{method}'"
+      | none =>
+          -- object.__init_subclass__ is a no-op in Python
+          if method == "__init_subclass__" then return .none
+          else throwAttributeError s!"'super' object has no attribute '{method}'"
     | _ => throwAttributeError s!"'super' object has no attribute '{method}'"
   | _ => throwAttributeError s!"'{typeName receiver}' object has no attribute '{method}'"
 

@@ -34,6 +34,22 @@ setup_types_dir() {
   done
 }
 
+setup_types_dir_tier5() {
+  local dir="$1"
+  setup_types_dir "$dir"
+  for f in byte_arrays.py bitfields.py; do
+    [ -f "$SRC/types/$f" ] && cp "$SRC/types/$f" "$dir/lean_spec/types/"
+  done
+}
+
+setup_types_dir_tier6() {
+  local dir="$1"
+  setup_types_dir_tier5 "$dir"
+  for f in collections.py union.py; do
+    [ -f "$SRC/types/$f" ] && cp "$SRC/types/$f" "$dir/lean_spec/types/"
+  done
+}
+
 # ============================================================
 echo "=== Tier 0: constants.py + exceptions.py ==="
 
@@ -205,6 +221,230 @@ True
 42
 1
 True"
+
+# ============================================================
+echo "=== Tier 5: byte_arrays.py (BaseBytes, Bytes32, Bytes4) ==="
+
+DIR=$(mktemp -d)
+setup_types_dir_tier5 "$DIR"
+cat > "$DIR/lean_spec/types/__init__.py" << 'INITEOF'
+from .constants import OFFSET_BYTE_LENGTH
+from .exceptions import SSZError, SSZTypeError, SSZValueError, SSZSerializationError
+from .base import CamelModel, StrictBaseModel
+from .ssz_base import SSZType, SSZModel
+from .uint import BaseUint, Uint8, Uint16, Uint32, Uint64
+from .boolean import Boolean
+from .container import Container
+from .byte_arrays import BaseBytes, Bytes4, Bytes32, ZERO_HASH
+INITEOF
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types.byte_arrays import BaseBytes, Bytes4, Bytes32, ZERO_HASH
+
+# Bytes4 from raw bytes
+b4 = Bytes4(b'\x01\x02\x03\x04')
+print(len(b4))
+print(b4.hex())
+
+# Bytes4 from hex string
+b4h = Bytes4('01020304')
+print(b4h == b4)
+
+# Bytes32.zero()
+z32 = Bytes32.zero()
+print(len(z32))
+print(z32 == ZERO_HASH)
+
+# is_fixed_size / get_byte_length
+print(Bytes32.is_fixed_size())
+print(Bytes32.get_byte_length())
+
+# encode_bytes / decode_bytes round-trip
+data = b4.encode_bytes()
+b4_2 = Bytes4.decode_bytes(data)
+print(b4_2 == b4)
+
+# Wrong length raises error
+try:
+    Bytes4(b'\x01\x02')
+except Exception as e:
+    print(type(e).__name__)
+EOF
+run_test "byte_arrays.py BaseBytes" "$DIR" "main.py" "4
+01020304
+True
+32
+True
+True
+32
+True
+SSZValueError"
+
+# ============================================================
+echo "=== Tier 5: bitfields.py (BaseBitvector, BaseBitlist) ==="
+
+DIR=$(mktemp -d)
+setup_types_dir_tier5 "$DIR"
+cat > "$DIR/lean_spec/types/__init__.py" << 'INITEOF'
+from .constants import OFFSET_BYTE_LENGTH
+from .exceptions import SSZError, SSZTypeError, SSZValueError, SSZSerializationError
+from .base import CamelModel, StrictBaseModel
+from .ssz_base import SSZType, SSZModel
+from .uint import BaseUint, Uint8, Uint16, Uint32, Uint64
+from .boolean import Boolean
+from .container import Container
+from .byte_arrays import BaseBytes, Bytes4, Bytes32, ZERO_HASH
+from .bitfields import BaseBitvector, BaseBitlist
+INITEOF
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types.bitfields import BaseBitvector, BaseBitlist
+from lean_spec.types.boolean import Boolean
+
+class Bitvec4(BaseBitvector):
+    LENGTH = 4
+
+bv = Bitvec4(data=[Boolean(True), Boolean(False), Boolean(True), Boolean(False)])
+print(len(bv.data))
+print(Bitvec4.is_fixed_size())
+data = bv.encode_bytes()
+print(len(data))
+bv2 = Bitvec4.decode_bytes(data)
+print(bv2 == bv)
+
+class Bits8(BaseBitlist):
+    LIMIT = 8
+
+bl = Bits8(data=[Boolean(True), Boolean(True), Boolean(False)])
+print(len(bl.data))
+print(Bits8.is_fixed_size())
+data = bl.encode_bytes()
+bl2 = Bits8.decode_bytes(data)
+print(bl2 == bl)
+EOF
+run_test "bitfields.py Bitvector+Bitlist" "$DIR" "main.py" "4
+True
+1
+True
+3
+False
+True"
+
+# ============================================================
+echo "=== Tier 6: collections.py (SSZVector, SSZList) ==="
+
+DIR=$(mktemp -d)
+setup_types_dir_tier6 "$DIR"
+cat > "$DIR/lean_spec/types/__init__.py" << 'INITEOF'
+from .constants import OFFSET_BYTE_LENGTH
+from .exceptions import SSZError, SSZTypeError, SSZValueError, SSZSerializationError
+from .base import CamelModel, StrictBaseModel
+from .ssz_base import SSZType, SSZModel
+from .uint import BaseUint, Uint8, Uint16, Uint32, Uint64
+from .boolean import Boolean
+from .container import Container
+from .byte_arrays import BaseBytes, Bytes4, Bytes32, ZERO_HASH
+from .bitfields import BaseBitvector, BaseBitlist
+from .collections import SSZVector, SSZList
+INITEOF
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types.collections import SSZVector, SSZList
+from lean_spec.types.uint import Uint64
+
+class Vec3(SSZVector):
+    ELEMENT_TYPE = Uint64
+    LENGTH = 3
+
+v = Vec3(data=[Uint64(1), Uint64(2), Uint64(3)])
+print(len(v))
+print(Vec3.is_fixed_size())
+print(Vec3.get_byte_length())
+data = v.encode_bytes()
+print(len(data))
+v2 = Vec3.decode_bytes(data)
+print(v2 == v)
+
+class List5(SSZList):
+    ELEMENT_TYPE = Uint64
+    LIMIT = 5
+
+l = List5(data=[Uint64(10), Uint64(20)])
+print(len(l))
+print(List5.is_fixed_size())
+data = l.encode_bytes()
+print(len(data))
+l2 = List5.decode_bytes(data)
+print(l2 == l)
+EOF
+run_test "collections.py SSZVector+SSZList" "$DIR" "main.py" "3
+True
+24
+24
+True
+2
+False
+16
+True"
+
+# ============================================================
+echo "=== Tier 6: union.py (SSZUnion) ==="
+
+DIR=$(mktemp -d)
+setup_types_dir_tier6 "$DIR"
+cat > "$DIR/lean_spec/types/__init__.py" << 'INITEOF'
+from .constants import OFFSET_BYTE_LENGTH
+from .exceptions import SSZError, SSZTypeError, SSZValueError, SSZSerializationError
+from .base import CamelModel, StrictBaseModel
+from .ssz_base import SSZType, SSZModel
+from .uint import BaseUint, Uint8, Uint16, Uint32, Uint64
+from .boolean import Boolean
+from .container import Container
+from .byte_arrays import BaseBytes, Bytes4, Bytes32, ZERO_HASH
+from .bitfields import BaseBitvector, BaseBitlist
+from .collections import SSZVector, SSZList
+from .union import SSZUnion
+INITEOF
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types.union import SSZUnion
+from lean_spec.types.uint import Uint64
+from lean_spec.types.boolean import Boolean
+
+class MyUnion(SSZUnion):
+    OPTIONS = (None, Uint64, Boolean)
+
+# None variant
+u0 = MyUnion(selector=0, value=None)
+print(u0.selector)
+print(u0.value)
+
+# Uint64 variant
+u1 = MyUnion(selector=1, value=Uint64(42))
+print(u1.selector)
+print(int(u1.value))
+
+# Boolean variant
+u2 = MyUnion(selector=2, value=Boolean(True))
+print(u2.selector)
+print(int(u2.value))
+
+# is_fixed_size
+print(MyUnion.is_fixed_size())
+
+# Serialize/deserialize round-trip for Uint64 variant
+data = u1.encode_bytes()
+print(len(data))
+u1_copy = MyUnion.decode_bytes(data)
+print(u1_copy.selector)
+print(int(u1_copy.value))
+EOF
+run_test "union.py SSZUnion" "$DIR" "main.py" "0
+None
+1
+42
+2
+1
+False
+9
+1
+42"
 
 # ============================================================
 echo ""

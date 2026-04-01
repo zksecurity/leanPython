@@ -448,6 +448,7 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
       | _ => pure ()
     return .bool false
   | [_, .classObj _] => return .bool false  -- non-instance is not an instance of a custom class
+  | [_, .none] => return .bool false  -- isinstance(x, None-stub) gracefully returns False
   | _ => throwTypeError "isinstance() takes 2 arguments"
 
 /-- Hash a single value for tuple/object hashing. -/
@@ -985,6 +986,18 @@ partial def callBuiltin (name : String) (args : List Value)
     match args with
     | [f] => return f
     | _ => throwTypeError "override() takes exactly 1 argument"
+  | "typing.overload" => do
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "overload() takes exactly 1 argument"
+  | "typing.runtime_checkable" => do
+    match args with
+    | [f] => return f
+    | _ => throwTypeError "runtime_checkable() takes exactly 1 argument"
+  | "typing.cast" => do
+    match args with
+    | [_, v] => return v
+    | _ => throwTypeError "cast() takes exactly 2 arguments"
   | "typing.TypeVar" => do
     -- TypeVar('T', bound=SomeType) — stub that returns .none
     return .none

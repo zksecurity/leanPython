@@ -120,11 +120,18 @@ partial def parseFromImportAlias : ParserM Alias := do
 
 /-- Parse an indented block: NEWLINE INDENT stmt+ DEDENT. -/
 partial def parseBlock : ParserM (List Stmt) := do
-  discard expectNewline
-  discard expectIndent
-  let stmts ← parseStatements
-  discard expectDedent
-  return stmts
+  -- Check for inline body (e.g., `def foo(): pass` or `def foo(): ...`)
+  match ← peekKind with
+  | some .newline =>
+    discard expectNewline
+    discard expectIndent
+    let stmts ← parseStatements
+    discard expectDedent
+    return stmts
+  | _ =>
+    -- Inline body: parse simple statements on the same line
+    let stmts ← parseSimpleStmts
+    return stmts
 
 /-- Parse one or more statements (until DEDENT or ENDMARKER). -/
 partial def parseStatements : ParserM (List Stmt) := do
@@ -269,9 +276,21 @@ partial def parseFromImport : ParserM Stmt := do
     let lvl := if level > 0 then some level else none
     return .importFrom modName aliases lvl (← spanFrom start)
   let hasParen ← if ← isDelimiter .lpar then do discard advance; pure true else pure false
-  let aliases ← sepBy1 parseFromImportAlias (discard (expectDelimiter .comma))
+  -- Parse comma-separated import aliases; trailing comma is allowed inside parens
+  let first ← parseFromImportAlias
+  let mut aliases := [first]
+  while true do
+    match ← attempt (discard (expectDelimiter .comma)) with
+    | none => break
+    | some _ =>
+      -- After comma, try to parse another alias; if it fails (trailing comma), stop
+      if hasParen then
+        match ← attempt parseFromImportAlias with
+        | some a => aliases := aliases ++ [a]
+        | none => break
+      else
+        aliases := aliases ++ [← parseFromImportAlias]
   if hasParen then
-    if ← isDelimiter .comma then discard advance
     discard (expectDelimiter .rpar)
   let lvl := if level > 0 then some level else none
   return .importFrom modName aliases lvl (← spanFrom start)

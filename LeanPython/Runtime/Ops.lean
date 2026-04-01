@@ -158,6 +158,17 @@ partial def valueEq (a b : Value) : InterpM Bool :=
     match ad.wrappedValue, bd.wrappedValue with
     | some va, some vb => valueEq va vb
     | _, _ => return false
+  -- Cross-type: instance with wrappedValue vs plain value
+  | .instance iref, other => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some wrapped => valueEq wrapped other
+    | none => return false
+  | other, .instance iref => do
+    let id_ ← heapGetInstanceData iref
+    match id_.wrappedValue with
+    | some wrapped => valueEq other wrapped
+    | none => return false
   | _, _ => return false
 
 -- ============================================================
@@ -530,6 +541,13 @@ partial def evalBinOp (op : BinOp) (left right : Value) : InterpM Value := do
               result := result.set! i (k, v); found := true; break
           if !found then result := result.push (k, v)
         allocDict result
+      -- Type union syntax: X | Y in annotations (PEP 604), e.g. int | str
+      | .none, _ => return .none
+      | _, .none => return .none
+      | .builtin _, .builtin _ => return .none
+      | .classObj _, .classObj _ => return .none
+      | .builtin _, .classObj _ => return .none
+      | .classObj _, .builtin _ => return .none
       | _, _ => throwTypeError s!"unsupported operand type(s) for |: '{typeName left}' and '{typeName right}'"
   | .bitAnd =>
     match toInt left, toInt right with
