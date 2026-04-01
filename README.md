@@ -40,9 +40,15 @@ curl https://elan.lean-lang.org/elan-init.sh -sSf | sh
 Clone and build:
 
 ```bash
-git clone https://github.com/zksecurity/leanPython.git
+git clone --recurse-submodules https://github.com/zksecurity/leanPython.git
 cd leanPython
 lake build
+```
+
+If you already cloned without `--recurse-submodules`, run:
+
+```bash
+git submodule update --init --recursive
 ```
 
 The first build downloads the Lean toolchain and compiles everything -- this takes a few minutes.
