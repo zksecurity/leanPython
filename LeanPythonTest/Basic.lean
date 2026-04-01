@@ -181,7 +181,9 @@ def tokenKinds (source : String) : Option (List TokenKind) :=
 -- Comments
 -- ============================================================
 
-#guard tokenKinds "# hello" == some [.comment "# hello", .newline, .endmarker]
+-- Comment-only lines are skipped (no comment tokens emitted)
+#guard tokenKinds "# hello" == some [.endmarker]
+-- Inline comments on code lines are still emitted
 #guard tokenKinds "x # comment" == some [.name "x", .comment "# comment", .newline, .endmarker]
 #guard tokenKinds "x # comment\n" == some [.name "x", .comment "# comment", .newline, .endmarker]
 

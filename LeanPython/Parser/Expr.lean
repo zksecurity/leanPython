@@ -69,19 +69,58 @@ partial def parseAtom : ParserM Expr := do
   | .integer n   => discard advance; return .constant (.int n) tok.span
   | .float_ f    => discard advance; return .constant (.float_ f) tok.span
   | .imaginary f => discard advance; return .constant (.imaginary f) tok.span
-  | .string s    => discard advance
-                     let mut result := s
-                     let mut endSpan := tok.span
-                     while true do
-                       match ← peekKind with
-                       | some (.string s2) =>
-                         let tok2 ← advance
-                         result := result ++ s2
-                         endSpan := tok2.span
-                       | _ => break
-                     return .constant (.string result) { start := tok.span.start, stop := endSpan.stop }
+  | .string s    => do
+    discard advance
+    let mut result := s
+    let mut endSpan := tok.span
+    -- Implicit string concatenation: adjacent string literals
+    while true do
+      match ← peekKind with
+      | some (.string s2) =>
+        let tok2 ← advance
+        result := result ++ s2
+        endSpan := tok2.span
+      | _ => break
+    -- Check if followed by f-string (implicit concat: "..." f"...")
+    match ← peekKind with
+    | some (.fstringToken parts2) =>
+      let tok2 ← advance
+      let mut allParts : Array FStringPart := #[.literal result]
+      for p in parts2 do allParts := allParts.push p
+      endSpan := tok2.span
+      -- Continue consuming adjacent strings/f-strings
+      while true do
+        match ← peekKind with
+        | some (.string s3) =>
+          let tok3 ← advance
+          allParts := allParts.push (.literal s3)
+          endSpan := tok3.span
+        | some (.fstringToken parts3) =>
+          let tok3 ← advance
+          for p in parts3 do allParts := allParts.push p
+          endSpan := tok3.span
+        | _ => break
+      parseFStringToken allParts { start := tok.span.start, stop := endSpan.stop }
+    | _ =>
+      return .constant (.string result) { start := tok.span.start, stop := endSpan.stop }
   | .bytes b     => discard advance; return .constant (.bytes b) tok.span
-  | .fstringToken parts => discard advance; parseFStringToken parts tok.span
+  | .fstringToken parts => do
+    discard advance
+    let mut allParts := parts
+    let mut endSpan := tok.span
+    -- Implicit concat with adjacent strings/f-strings
+    while true do
+      match ← peekKind with
+      | some (.string s2) =>
+        let tok2 ← advance
+        allParts := allParts.push (.literal s2)
+        endSpan := tok2.span
+      | some (.fstringToken parts2) =>
+        let tok2 ← advance
+        for p in parts2 do allParts := allParts.push p
+        endSpan := tok2.span
+      | _ => break
+    parseFStringToken allParts { start := tok.span.start, stop := endSpan.stop }
   | .name n      => discard advance; return .name n tok.span
   | .keyword .true_  => discard advance; return .constant .true_ tok.span
   | .keyword .false_ => discard advance; return .constant .false_ tok.span

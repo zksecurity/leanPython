@@ -340,6 +340,20 @@ partial def lexToken : LexerM Token := do
         set { s3 with pendingTokens := rest }
         return tok
       | [] => pure ()
+    else
+      -- Blank/comment-only line: skip rest of line (including comment and newline)
+      -- and re-enter lexToken to process the next line
+      let mut c ← LexerM.peekChar
+      while c.isSome && c != some '\n' && c != some '\r' do
+        LexerM.advance
+        c ← LexerM.peekChar
+      -- Skip the newline itself (if present)
+      if c == some '\r' then LexerM.advance
+      if (← LexerM.peekChar) == some '\n' then LexerM.advance
+      -- If at EOF, fall through to normal EOF handling (keep atLineStart true)
+      let sCheck ← get
+      if sCheck.pos.byteIdx < sCheck.source.utf8ByteSize then
+        return ← lexToken
   -- Skip whitespace and line continuations
   skipWhitespaceAndContinuations
   -- Get position

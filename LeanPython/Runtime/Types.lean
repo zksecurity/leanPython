@@ -72,6 +72,7 @@ structure FuncData where
   kwDefaults : Array (Option Value)
   closure    : ClosureEnv
   isGenerator : Bool
+  definingModule : Option String := none
 
 -- ============================================================
 -- Class and instance data (stored on the heap)
