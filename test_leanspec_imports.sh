@@ -8,7 +8,8 @@
 set -euo pipefail
 
 EXE=".lake/build/bin/leanPython"
-SRC="/home/zksecurity/leanPython/references/leanSpec/src"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+SRC="$SCRIPT_DIR/references/leanSpec/src"
 
 if [ ! -f "$EXE" ]; then
   echo "error: $EXE not found — run 'lake build' first"
