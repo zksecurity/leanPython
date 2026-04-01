@@ -54,10 +54,12 @@ echo 'print("Hello, World!")' > hello.py
 lake exe leanPython hello.py
 ```
 
-Run the test suite:
+Run the tests:
 
 ```bash
-lake test
+lake test                    # Lean unit tests (#eval/#guard assertions)
+./test_leanspec.sh           # E2E integration tests (19 tiers against real leanSpec files)
+./test_leanspec_imports.sh   # leanSpec module import coverage (PASS/XFAIL/FAIL)
 ```
 
 ## Project structure
