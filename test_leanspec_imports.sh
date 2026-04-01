@@ -20,122 +20,120 @@ FAIL=0
 XFAIL=0
 FAILURES=""
 
-# Expected failures: module_pattern -> "issue_number reason"
-# Modules matching these patterns are XFAIL (expected to fail).
-declare -A XFAIL_MAP
-
-# #5: lean_multisig_py (pending pure Python impl)
-XFAIL_MAP["lean_spec.subspecs.xmss.aggregation"]="#5 lean_multisig_py"
-# Transitive: everything importing xmss.aggregation
-XFAIL_MAP["lean_spec.subspecs.xmss.interface"]="#5 imports aggregation transitively"
-XFAIL_MAP["lean_spec.subspecs.containers.attestation.attestation"]="#5 imports xmss.aggregation"
-XFAIL_MAP["lean_spec.subspecs.containers.block.block"]="#5 imports xmss.aggregation"
-XFAIL_MAP["lean_spec.subspecs.containers.block.types"]="#4,#5 dict subclass + xmss.aggregation"
-XFAIL_MAP["lean_spec.subspecs.containers.state.state"]="#5 imports xmss.aggregation"
-XFAIL_MAP["lean_spec.subspecs.containers.validator"]="#5 imports xmss.containers->config"
-XFAIL_MAP["lean_spec.subspecs.containers.attestation.aggregation_bits"]="#5 imports validator->xmss"
-XFAIL_MAP["lean_spec.subspecs.containers.state.types"]="#5 imports validator->xmss"
-
-# #5: XMSS modules that need lean_spec.config (get_args / PEP 695 __value__)
-XFAIL_MAP["lean_spec.config"]="#5 get_args + PEP695 __value__"
-XFAIL_MAP["lean_spec.subspecs.xmss.constants"]="#5 imports lean_spec.config"
-XFAIL_MAP["lean_spec.subspecs.xmss.types"]="#5 imports xmss.constants"
-XFAIL_MAP["lean_spec.subspecs.xmss.containers"]="#5 imports xmss.constants"
-XFAIL_MAP["lean_spec.subspecs.xmss._validation"]="#5 imports lean_spec.config"
-XFAIL_MAP["lean_spec.subspecs.xmss.hypercube"]="#5 imports xmss.constants"
-XFAIL_MAP["lean_spec.subspecs.xmss.message_hash"]="#5 imports xmss chain"
-XFAIL_MAP["lean_spec.subspecs.xmss.poseidon"]="#5 imports xmss chain"
-XFAIL_MAP["lean_spec.subspecs.xmss.prf"]="#5 imports xmss.constants"
-XFAIL_MAP["lean_spec.subspecs.xmss.rand"]="#5 imports xmss.constants"
-XFAIL_MAP["lean_spec.subspecs.xmss.subtree"]="#5 imports xmss.types"
-XFAIL_MAP["lean_spec.subspecs.xmss.target_sum"]="#5 imports xmss.constants"
-XFAIL_MAP["lean_spec.subspecs.xmss.tweak_hash"]="#5 imports xmss chain"
-XFAIL_MAP["lean_spec.subspecs.xmss.utils"]="#5 imports xmss chain"
-
-# #6: numpy/numba (pending pure Python impl)
-XFAIL_MAP["lean_spec.subspecs.poseidon2.permutation"]="#6 numpy"
-XFAIL_MAP["lean_spec.subspecs.poseidon2.constants"]="#6 imports permutation transitively"
-
-# #7: asyncio
-XFAIL_MAP["lean_spec.__main__"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.chain.clock"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.chain.service"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.api.server"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.api.routes"]="#7 imports api.server"
-XFAIL_MAP["lean_spec.subspecs.api.endpoints.checkpoints"]="#7 imports api chain"
-XFAIL_MAP["lean_spec.subspecs.api.endpoints.fork_choice"]="#7 imports api chain"
-XFAIL_MAP["lean_spec.subspecs.api.endpoints.health"]="#7 imports api chain"
-XFAIL_MAP["lean_spec.subspecs.api.endpoints.metrics"]="#7 imports api chain"
-XFAIL_MAP["lean_spec.subspecs.api.endpoints.states"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.networking.client.event_source"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.networking.client.reqresp_client"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.service"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.transport"]="#7 asyncio + cryptography"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.behavior"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.networking.service.service"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.networking.service.events"]="#7 imports service chain"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.quic.connection"]="#7 asyncio + aioquic"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.quic.stream_adapter"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.node.node"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.sync.service"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.sync.backfill_sync"]="#7 imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.sync.checkpoint_sync"]="#7 imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.sync.head_sync"]="#7 imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.validator.service"]="#7 asyncio"
-XFAIL_MAP["lean_spec.subspecs.validator.registry"]="#5,#7 imports xmss + chain"
-
-# chain/__init__.py imports clock.py which uses asyncio, blocking all chain.* imports
-XFAIL_MAP["lean_spec.subspecs.chain.config"]="#7 chain/__init__.py imports clock->asyncio"
-XFAIL_MAP["lean_spec.subspecs.containers.checkpoint"]="#7 imports chain->clock->asyncio"
-XFAIL_MAP["lean_spec.subspecs.containers.config"]="#7 imports chain->clock->asyncio"
-XFAIL_MAP["lean_spec.subspecs.containers.slot"]="#7 imports chain->clock->asyncio"
-
-# #9: prometheus_client
-XFAIL_MAP["lean_spec.subspecs.metrics.registry"]="#9 prometheus_client"
-XFAIL_MAP["lean_spec.subspecs.forkchoice.store"]="#5,#9 xmss + prometheus_client"
-
-# Other external deps (cryptography, aioquic, sqlite3)
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.crypto"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.keys"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.handshake"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.codec"]="imports discovery chain"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.config"]="imports discovery chain"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.messages"]="imports discovery chain"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.packet"]="imports discovery chain"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.routing"]="imports discovery chain"
-XFAIL_MAP["lean_spec.subspecs.networking.discovery.session"]="imports discovery chain"
-XFAIL_MAP["lean_spec.subspecs.networking.enr.enr"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.enr.eth2"]="imports enr chain"
-XFAIL_MAP["lean_spec.subspecs.networking.enr.keys"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.identity.keypair"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.identity.signature"]="cryptography lib"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.peer_id"]="imports identity chain"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.protocols"]="imports transport chain"
-XFAIL_MAP["lean_spec.subspecs.networking.transport.quic.tls"]="aioquic + cryptography"
-XFAIL_MAP["lean_spec.subspecs.networking.peer"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.config"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.types"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.varint"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.reqresp.codec"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.reqresp.handler"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.reqresp.message"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.mcache"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.mesh"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.message"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.parameters"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.rpc"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.topic"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.networking.gossipsub.types"]="imports networking chain"
-XFAIL_MAP["lean_spec.subspecs.storage.sqlite"]="sqlite3"
-XFAIL_MAP["lean_spec.subspecs.storage.database"]="imports storage chain"
-XFAIL_MAP["lean_spec.subspecs.storage.exceptions"]="imports storage chain"
-XFAIL_MAP["lean_spec.subspecs.storage.namespaces"]="imports storage chain"
-XFAIL_MAP["lean_spec.subspecs.sync.block_cache"]="imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.sync.config"]="imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.sync.peer_manager"]="imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.sync.states"]="imports sync chain"
-XFAIL_MAP["lean_spec.subspecs.genesis.config"]="#5 imports xmss chain"
-XFAIL_MAP["lean_spec.subspecs.genesis.state"]="#5 imports genesis.config"
+# Expected failures: module -> "issue_number reason"
+# Modules matching these entries are XFAIL (expected to fail).
+# Uses a lookup function instead of `declare -A` for Bash 3.2 (macOS) compatibility.
+xfail_reason() {
+  case "$1" in
+    # #5: lean_multisig_py (pending pure Python impl)
+    lean_spec.subspecs.xmss.aggregation) echo "#5 lean_multisig_py" ;;
+    # Transitive: everything importing xmss.aggregation
+    lean_spec.subspecs.xmss.interface) echo "#5 imports aggregation transitively" ;;
+    lean_spec.subspecs.containers.attestation.attestation) echo "#5 imports xmss.aggregation" ;;
+    lean_spec.subspecs.containers.block.block) echo "#5 imports xmss.aggregation" ;;
+    lean_spec.subspecs.containers.block.types) echo "#4,#5 dict subclass + xmss.aggregation" ;;
+    lean_spec.subspecs.containers.state.state) echo "#5 imports xmss.aggregation" ;;
+    lean_spec.subspecs.containers.validator) echo "#5 imports xmss.containers->config" ;;
+    lean_spec.subspecs.containers.attestation.aggregation_bits) echo "#5 imports validator->xmss" ;;
+    lean_spec.subspecs.containers.state.types) echo "#5 imports validator->xmss" ;;
+    # #5: XMSS modules that need lean_spec.config (get_args / PEP 695 __value__)
+    lean_spec.config) echo "#5 get_args + PEP695 __value__" ;;
+    lean_spec.subspecs.xmss.constants) echo "#5 imports lean_spec.config" ;;
+    lean_spec.subspecs.xmss.types) echo "#5 imports xmss.constants" ;;
+    lean_spec.subspecs.xmss.containers) echo "#5 imports xmss.constants" ;;
+    lean_spec.subspecs.xmss._validation) echo "#5 imports lean_spec.config" ;;
+    lean_spec.subspecs.xmss.hypercube) echo "#5 imports xmss.constants" ;;
+    lean_spec.subspecs.xmss.message_hash) echo "#5 imports xmss chain" ;;
+    lean_spec.subspecs.xmss.poseidon) echo "#5 imports xmss chain" ;;
+    lean_spec.subspecs.xmss.prf) echo "#5 imports xmss.constants" ;;
+    lean_spec.subspecs.xmss.rand) echo "#5 imports xmss.constants" ;;
+    lean_spec.subspecs.xmss.subtree) echo "#5 imports xmss.types" ;;
+    lean_spec.subspecs.xmss.target_sum) echo "#5 imports xmss.constants" ;;
+    lean_spec.subspecs.xmss.tweak_hash) echo "#5 imports xmss chain" ;;
+    lean_spec.subspecs.xmss.utils) echo "#5 imports xmss chain" ;;
+    # #6: numpy/numba (pending pure Python impl)
+    lean_spec.subspecs.poseidon2.permutation) echo "#6 numpy" ;;
+    lean_spec.subspecs.poseidon2.constants) echo "#6 imports permutation transitively" ;;
+    # #7: asyncio
+    lean_spec.__main__) echo "#7 asyncio" ;;
+    lean_spec.subspecs.chain.clock) echo "#7 asyncio" ;;
+    lean_spec.subspecs.chain.service) echo "#7 asyncio" ;;
+    lean_spec.subspecs.api.server) echo "#7 asyncio" ;;
+    lean_spec.subspecs.api.routes) echo "#7 imports api.server" ;;
+    lean_spec.subspecs.api.endpoints.checkpoints) echo "#7 imports api chain" ;;
+    lean_spec.subspecs.api.endpoints.fork_choice) echo "#7 imports api chain" ;;
+    lean_spec.subspecs.api.endpoints.health) echo "#7 imports api chain" ;;
+    lean_spec.subspecs.api.endpoints.metrics) echo "#7 imports api chain" ;;
+    lean_spec.subspecs.api.endpoints.states) echo "#7 asyncio" ;;
+    lean_spec.subspecs.networking.client.event_source) echo "#7 asyncio" ;;
+    lean_spec.subspecs.networking.client.reqresp_client) echo "#7 asyncio" ;;
+    lean_spec.subspecs.networking.discovery.service) echo "#7 asyncio" ;;
+    lean_spec.subspecs.networking.discovery.transport) echo "#7 asyncio + cryptography" ;;
+    lean_spec.subspecs.networking.gossipsub.behavior) echo "#7 asyncio" ;;
+    lean_spec.subspecs.networking.service.service) echo "#7 asyncio" ;;
+    lean_spec.subspecs.networking.service.events) echo "#7 imports service chain" ;;
+    lean_spec.subspecs.networking.transport.quic.connection) echo "#7 asyncio + aioquic" ;;
+    lean_spec.subspecs.networking.transport.quic.stream_adapter) echo "#7 asyncio" ;;
+    lean_spec.subspecs.node.node) echo "#7 asyncio" ;;
+    lean_spec.subspecs.sync.service) echo "#7 asyncio" ;;
+    lean_spec.subspecs.sync.backfill_sync) echo "#7 imports sync chain" ;;
+    lean_spec.subspecs.sync.checkpoint_sync) echo "#7 imports sync chain" ;;
+    lean_spec.subspecs.sync.head_sync) echo "#7 imports sync chain" ;;
+    lean_spec.subspecs.validator.service) echo "#7 asyncio" ;;
+    lean_spec.subspecs.validator.registry) echo "#5,#7 imports xmss + chain" ;;
+    # chain/__init__.py imports clock.py which uses asyncio, blocking all chain.* imports
+    lean_spec.subspecs.chain.config) echo "#7 chain/__init__.py imports clock->asyncio" ;;
+    lean_spec.subspecs.containers.checkpoint) echo "#7 imports chain->clock->asyncio" ;;
+    lean_spec.subspecs.containers.config) echo "#7 imports chain->clock->asyncio" ;;
+    lean_spec.subspecs.containers.slot) echo "#7 imports chain->clock->asyncio" ;;
+    # #9: prometheus_client
+    lean_spec.subspecs.metrics.registry) echo "#9 prometheus_client" ;;
+    lean_spec.subspecs.forkchoice.store) echo "#5,#9 xmss + prometheus_client" ;;
+    # Other external deps (cryptography, aioquic, sqlite3)
+    lean_spec.subspecs.networking.discovery.crypto) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.discovery.keys) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.discovery.handshake) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.discovery.codec) echo "imports discovery chain" ;;
+    lean_spec.subspecs.networking.discovery.config) echo "imports discovery chain" ;;
+    lean_spec.subspecs.networking.discovery.messages) echo "imports discovery chain" ;;
+    lean_spec.subspecs.networking.discovery.packet) echo "imports discovery chain" ;;
+    lean_spec.subspecs.networking.discovery.routing) echo "imports discovery chain" ;;
+    lean_spec.subspecs.networking.discovery.session) echo "imports discovery chain" ;;
+    lean_spec.subspecs.networking.enr.enr) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.enr.eth2) echo "imports enr chain" ;;
+    lean_spec.subspecs.networking.enr.keys) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.transport.identity.keypair) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.transport.identity.signature) echo "cryptography lib" ;;
+    lean_spec.subspecs.networking.transport.peer_id) echo "imports identity chain" ;;
+    lean_spec.subspecs.networking.transport.protocols) echo "imports transport chain" ;;
+    lean_spec.subspecs.networking.transport.quic.tls) echo "aioquic + cryptography" ;;
+    lean_spec.subspecs.networking.peer) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.config) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.types) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.varint) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.reqresp.codec) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.reqresp.handler) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.reqresp.message) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.mcache) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.mesh) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.message) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.parameters) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.rpc) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.topic) echo "imports networking chain" ;;
+    lean_spec.subspecs.networking.gossipsub.types) echo "imports networking chain" ;;
+    lean_spec.subspecs.storage.sqlite) echo "sqlite3" ;;
+    lean_spec.subspecs.storage.database) echo "imports storage chain" ;;
+    lean_spec.subspecs.storage.exceptions) echo "imports storage chain" ;;
+    lean_spec.subspecs.storage.namespaces) echo "imports storage chain" ;;
+    lean_spec.subspecs.sync.block_cache) echo "imports sync chain" ;;
+    lean_spec.subspecs.sync.config) echo "imports sync chain" ;;
+    lean_spec.subspecs.sync.peer_manager) echo "imports sync chain" ;;
+    lean_spec.subspecs.sync.states) echo "imports sync chain" ;;
+    lean_spec.subspecs.genesis.config) echo "#5 imports xmss chain" ;;
+    lean_spec.subspecs.genesis.state) echo "#5 imports genesis.config" ;;
+    *) echo "" ;;
+  esac
+}
 
 # --- Test runner ---
 
@@ -169,7 +167,7 @@ MODULES=$(find "$SRC/lean_spec" -name "*.py" -not -name "__init__.py" -not -path
   | sed "s|$SRC/||; s|/|.|g; s|\.py$||" | sort)
 
 for mod in $MODULES; do
-  xfail_reason="${XFAIL_MAP[$mod]:-}"
+  xfail_reason="$(xfail_reason "$mod")"
 
   output=$(try_import "$mod" 2>&1) && ok=true || ok=false
 
