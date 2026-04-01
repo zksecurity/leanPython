@@ -1,10 +1,12 @@
-# LeanPython
+# leanPython
 
 **Warning: This codebase was vibe-coded with Claude. Do not use this for anything of value.**
 
 No theorem proving is involved yet. This is plain Lean4 code that happens to be written in a language with a proof assistant -- we're not using that capability at this stage.
 
 LeanPython is a tree-walking Python 3.12 interpreter written in Lean4. The end goal is to interpret the [leanSpec](https://github.com/leanEthereum/leanSpec) Ethereum consensus specification, making Python specs usable from within Lean4.
+
+I expect there are still thousands of differences between Python 3.12 and leanPython.
 
 ## Features
 
@@ -113,4 +115,4 @@ Measured on 5 representative leanSpec tiers, each averaged over 3 runs.
 
 ## Contributing
 
-The codebase is still rapidly changing and the author is pushing to main directly. Please wait for things to stabilize before opening PRs.
+The codebase is still rapidly changing. Big PRs might not be able to catch up with the whole pace.
