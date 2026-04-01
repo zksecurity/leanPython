@@ -399,6 +399,14 @@ private partial def getOrCreateBuiltinTypeClass (name : String) : InterpM Value 
       "hex", "fromhex", "decode", "join"
     ] do
       ns := ns.insert dunder (.builtin s!"bytes.{dunder}")
+  else if name == "dict" then
+    for dunder in [
+      "__new__", "__init__", "__len__", "__getitem__", "__setitem__", "__delitem__",
+      "__contains__", "__iter__", "__eq__", "__ne__", "__or__",
+      "__repr__", "__str__", "__bool__",
+      "get", "keys", "values", "items", "pop", "update", "clear", "copy", "setdefault"
+    ] do
+      ns := ns.insert dunder (.builtin s!"dict.{dunder}")
   -- Create the class with object as base
   let cls ← allocClassObj { name := name, bases := #[objectCls], mro := #[], ns := ns, slots := none }
   -- Compute MRO: [self, object]
@@ -414,7 +422,7 @@ private def resolveClassBases (bases : List Value) : InterpM (List Value) := do
   bases.mapM fun base =>
     match base with
     | .builtin name =>
-      if name == "int" || name == "bytes" || name == "object" || name == "bool" then
+      if name == "int" || name == "bytes" || name == "object" || name == "bool" || name == "dict" then
         getOrCreateBuiltinTypeClass name
       else pure base
     | _ => pure base
@@ -1527,6 +1535,51 @@ partial def callValueDispatch (callee : Value) (args : List Value)
         | none =>
           allocInstance { cls := cls, attrs := {}, wrappedValue := some (.bytes ByteArray.empty) }
         | some other => throwTypeError s!"bytes.__new__: cannot convert {typeName other} to bytes"
+      else if name == "dict.__new__" then do
+        -- dict.__new__(cls) — create an instance with an empty wrapped dict
+        let cls ← match args with
+          | [cls@(.classObj _)] => pure cls
+          | [_, cls@(.classObj _)] => pure cls  -- super() prepends inst
+          | [cls@(.classObj _), _] => pure cls  -- cls, init_arg (init_arg handled by __init__)
+          | [_, cls@(.classObj _), _] => pure cls  -- super() prepends inst + init_arg
+          | _ => throwTypeError "dict.__new__(cls) requires a class"
+        let dictRef ← heapAlloc (.dictObj #[])
+        allocInstance { cls := cls, attrs := {}, wrappedValue := some (.dict dictRef) }
+      else if name == "dict.__init__" then do
+        -- dict.__init__(self, source?, **kwargs) — populate the wrapped dict
+        let (selfVal, initArgs, initKwargs) ← match args with
+          | [s] => pure (s, none, kwargs)
+          | [s, arg] => pure (s, some arg, kwargs)
+          | _ => pure (args.head!, none, kwargs)
+        -- Get the wrapped dict ref from self
+        let dictRef ← match selfVal with
+          | .instance iref => do
+            let id_ ← heapGetInstanceData iref
+            match id_.wrappedValue with
+            | some (.dict ref) => pure ref
+            | _ => throwTypeError "dict.__init__: self has no wrapped dict"
+          | _ => throwTypeError "dict.__init__: expected instance"
+        -- Copy entries from source argument
+        match initArgs with
+        | some (.dict srcRef) => do
+          let srcPairs ← heapGetDict srcRef
+          heapSetDict dictRef srcPairs
+        | some (.instance iref) => do
+          let id_ ← heapGetInstanceData iref
+          match id_.wrappedValue with
+          | some (.dict srcRef) => do
+            let srcPairs ← heapGetDict srcRef
+            heapSetDict dictRef srcPairs
+          | _ => throwTypeError "dict.__init__: cannot convert to dict"
+        | some _ => throwTypeError "dict.__init__: cannot convert to dict"
+        | none => pure ()
+        -- Add kwargs entries
+        if !initKwargs.isEmpty then
+          let mut pairs ← heapGetDict dictRef
+          for (k, v) in initKwargs do
+            pairs := pairs.push (.str k, v)
+          heapSetDict dictRef pairs
+        return .none
       else if name.startsWith "int." then do
         -- Dispatch int dunder methods: extract wrapped int values
         let methodName := String.ofList (name.toList.drop "int.".length)
@@ -1881,6 +1934,127 @@ partial def callValueDispatch (callee : Value) (args : List Value)
             return .bytes result
           | _ => throwTypeError "bytes.join takes 1 argument"
         | _ => throwTypeError s!"bytes.{methodName} is not implemented"
+      else if name.startsWith "dict." then do
+        -- Dispatch dict dunder/methods: extract wrapped dict ref
+        let methodName := String.ofList (name.toList.drop "dict.".length)
+        let extractDictRef : Value → InterpM HeapRef := fun v =>
+          match v with
+          | .dict ref => pure ref
+          | .instance iref => do
+            let id_ ← heapGetInstanceData iref
+            match id_.wrappedValue with
+            | some (.dict ref) => pure ref
+            | _ => throwTypeError s!"dict.{methodName}: expected dict, got {typeName v}"
+          | _ => throwTypeError s!"dict.{methodName}: expected dict, got {typeName v}"
+        match methodName with
+        | "__len__" =>
+          let ref ← extractDictRef args.head!
+          return .int (← heapGetDict ref).size
+        | "__getitem__" =>
+          let ref ← extractDictRef args.head!
+          let idx := args.tail.head!
+          let pairs ← heapGetDict ref
+          for (k, v) in pairs do
+            if ← valueEq k idx then return v
+          throwKeyError (← valueRepr idx)
+        | "__setitem__" =>
+          let ref ← extractDictRef args.head!
+          let idx := args.tail.head!
+          let value := args.tail.tail.head!
+          let pairs ← heapGetDict ref
+          let mut newPairs := pairs
+          let mut found := false
+          for i in [:pairs.size] do
+            if ← valueEq pairs[i]!.1 idx then
+              newPairs := newPairs.set! i (idx, value); found := true; break
+          if !found then newPairs := newPairs.push (idx, value)
+          heapSetDict ref newPairs
+          return .none
+        | "__delitem__" =>
+          let ref ← extractDictRef args.head!
+          let idx := args.tail.head!
+          let pairs ← heapGetDict ref
+          let mut newPairs : Array (Value × Value) := #[]
+          let mut found := false
+          for (k, v) in pairs do
+            if !found && (← valueEq k idx) then found := true
+            else newPairs := newPairs.push (k, v)
+          if !found then throwKeyError (← valueRepr idx)
+          heapSetDict ref newPairs
+          return .none
+        | "__contains__" =>
+          let ref ← extractDictRef args.head!
+          let elem := args.tail.head!
+          let pairs ← heapGetDict ref
+          for (k, _) in pairs do
+            if ← valueEq k elem then return .bool true
+          return .bool false
+        | "__iter__" =>
+          let ref ← extractDictRef args.head!
+          let pairs ← heapGetDict ref
+          let keys := pairs.map Prod.fst
+          allocGenerator keys
+        | "__eq__" =>
+          let refA ← extractDictRef args.head!
+          let pairsA ← heapGetDict refA
+          match args.tail.head! with
+          | .dict refB => do
+            let pairsB ← heapGetDict refB
+            if pairsA.size != pairsB.size then return .bool false
+            for (k, v) in pairsA do
+              let mut found := false
+              for (k2, v2) in pairsB do
+                if ← valueEq k k2 then
+                  if ← valueEq v v2 then found := true
+                  break
+              if !found then return .bool false
+            return .bool true
+          | .instance iref => do
+            let id_ ← heapGetInstanceData iref
+            match id_.wrappedValue with
+            | some (.dict refB) => do
+              let pairsB ← heapGetDict refB
+              if pairsA.size != pairsB.size then return .bool false
+              for (k, v) in pairsA do
+                let mut found := false
+                for (k2, v2) in pairsB do
+                  if ← valueEq k k2 then
+                    if ← valueEq v v2 then found := true
+                    break
+                if !found then return .bool false
+              return .bool true
+            | _ => return .bool false
+          | _ => return .bool false
+        | "__ne__" =>
+          let eqResult ← callValueDispatch (.builtin "dict.__eq__") args kwargs
+          match eqResult with
+          | .bool b => return .bool (!b)
+          | _ => return .bool true
+        | "__or__" =>
+          let refA ← extractDictRef args.head!
+          let pairsA ← heapGetDict refA
+          let refB ← extractDictRef args.tail.head!
+          let pairsB ← heapGetDict refB
+          let mut result := pairsA
+          for (k, v) in pairsB do
+            let mut found := false
+            for i in [:result.size] do
+              if ← valueEq result[i]!.1 k then
+                result := result.set! i (k, v); found := true; break
+            if !found then result := result.push (k, v)
+          allocDict result
+        | "__bool__" =>
+          let ref ← extractDictRef args.head!
+          return .bool !(← heapGetDict ref).isEmpty
+        | "__repr__" | "__str__" =>
+          let ref ← extractDictRef args.head!
+          let s ← valueRepr (.dict ref)
+          return .str s
+        | "get" | "keys" | "values" | "items" | "pop" | "update" |
+          "clear" | "copy" | "setdefault" =>
+          let ref ← extractDictRef args.head!
+          callDictMethod ref methodName args.tail
+        | _ => throwTypeError s!"dict.{methodName} is not implemented"
       -- ============================================================
       -- functools.singledispatch dispatch and register
       -- ============================================================
@@ -2644,6 +2818,7 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
             | .function _ => return .boundMethod obj attr
             | .staticMethod fn => return fn
             | .classMethod _ => return .boundMethod id_.cls attr
+            | .builtin _ => return .boundMethod obj attr
             | _ => return v
         | _ => pure ()
       -- Fallback: try __getattr__ hook before raising
@@ -2776,7 +2951,7 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
     -- Allow subscripting on builtin type names for type annotations (list[int], dict[str, int], etc.)
     match name with
     | "list" | "dict" | "set" | "tuple" | "frozenset" | "type"
-    | "memoryview" | "complex" => return .none
+    | "memoryview" | "complex" => return (.builtin name)
     | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
   | _ => throwTypeError s!"'{typeName obj}' object is not subscriptable"
 

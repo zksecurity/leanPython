@@ -674,3 +674,34 @@ private def assertPyError (source errSubstr : String) : IO Unit := do
 
 -- Match/case used as variable name (soft keyword)
 #eval assertPy "match = 5\nprint(match)\n" "5\n"
+
+-- ============================================================
+-- Dict subclass tests
+-- ============================================================
+
+-- Dict subclass: basic construction (empty)
+#eval assertPy "class D(dict):\n    pass\nd = D()\nprint(len(d))\n" "0\n"
+
+-- Dict subclass: construction with dict arg
+#eval assertPy "class D(dict):\n    pass\nd = D({1: 'a', 2: 'b'})\nprint(len(d))\nprint(d[1])\n" "2\na\n"
+
+-- Dict subclass: setitem, getitem, contains
+#eval assertPy "class D(dict):\n    pass\nd = D()\nd[1] = 'x'\nprint(1 in d)\nprint(d[1])\n" "True\nx\n"
+
+-- Dict subclass: iteration
+#eval assertPy "class D(dict):\n    pass\nd = D({1: 'a', 2: 'b'})\nfor k in d:\n    print(k)\n" "1\n2\n"
+
+-- Dict subclass: isinstance
+#eval assertPy "class D(dict):\n    pass\nd = D()\nprint(isinstance(d, dict))\nprint(isinstance(d, D))\n" "True\nTrue\n"
+
+-- Dict subclass: __or__ via super()
+#eval assertPy "class D(dict):\n    def __or__(self, other):\n        return D(super().__or__(other))\nd = D({1: 'a'})\nresult = d | {2: 'b'}\nprint(len(result))\nprint(isinstance(result, D))\n" "2\nTrue\n"
+
+-- Dict subclass: generic subscript base (dict[str, int])
+#eval assertPy "class D(dict[str, int]):\n    pass\nd = D()\nd['x'] = 1\nprint(d['x'])\n" "1\n"
+
+-- Dict subclass: .get method
+#eval assertPy "class D(dict):\n    pass\nd = D({1: 'a'})\nprint(d.get(1))\nprint(d.get(2, 'default'))\n" "a\ndefault\n"
+
+-- Dict subclass: .keys, .values, .items
+#eval assertPy "class D(dict):\n    pass\nd = D({1: 'a'})\nprint(list(d.keys()))\nprint(list(d.values()))\n" "[1]\n['a']\n"
