@@ -375,6 +375,11 @@ partial def builtinIsinstance (args : List Value) : InterpM Value := do
         | "set" => tn == "set"
         | "bytes" => tn == "bytes"
         | "bytearray" => tn == "bytearray"
+        | "slice" =>
+          -- Slices are encoded as tuples of length 3 internally
+          match obj with
+          | .tuple items => items.size == 3
+          | _ => false
         | "type" =>
           -- classObj values are types, and builtin type names (int, str, etc.) are types
           tn == "type" || match obj with

@@ -931,6 +931,417 @@ True
 1704085200
 True"
 
+
+# ============================================================
+# Full containers setup: adds XMSS stubs + all real container files
+# ============================================================
+setup_subspecs_containers_full() {
+  local dir="$1"
+  setup_subspecs_containers_basic "$dir"
+
+  # --- XMSS stub modules (avoid lean_multisig_py and circular deps) ---
+  mkdir -p "$dir/lean_spec/subspecs/xmss"
+  echo '"""XMSS stub package."""' > "$dir/lean_spec/subspecs/xmss/__init__.py"
+
+  cat > "$dir/lean_spec/subspecs/xmss/containers.py" << 'XMSSEOF'
+"""Stub XMSS containers for testing without lean_multisig_py."""
+from __future__ import annotations
+from lean_spec.types import Bytes32, Uint64
+from lean_spec.types.container import Container
+
+class PublicKey(Container):
+    """Stub public key."""
+    root: Bytes32
+    parameter: Bytes32
+
+    @classmethod
+    def decode_bytes(cls, data):
+        half = len(data) // 2
+        return cls(root=Bytes32(data[:32]), parameter=Bytes32(data[32:64]))
+
+class Signature(Container):
+    """Stub signature."""
+    path: Bytes32
+    rho: Bytes32
+    hashes: Bytes32
+
+    @classmethod
+    def is_fixed_size(cls):
+        return True
+
+    @classmethod
+    def get_byte_length(cls):
+        return 96
+
+    def verify(self, public_key, slot, message, scheme):
+        return True
+
+class SecretKey(Container):
+    """Stub secret key."""
+    data: Bytes32
+
+class KeyPair:
+    def __init__(self, public, secret):
+        self.public = public
+        self.secret = secret
+
+class ValidatorKeyPair:
+    def __init__(self, attestation_public=None, attestation_secret=None,
+                 proposal_public=None, proposal_secret=None):
+        self.attestation_public = attestation_public
+        self.attestation_secret = attestation_secret
+        self.proposal_public = proposal_public
+        self.proposal_secret = proposal_secret
+XMSSEOF
+
+  cat > "$dir/lean_spec/subspecs/xmss/aggregation.py" << 'XMSSEOF'
+"""Stub XMSS aggregation for testing without lean_multisig_py."""
+from __future__ import annotations
+from lean_spec.types import Bytes32
+from lean_spec.types.container import Container
+
+class AggregationError(Exception):
+    """Raised when signature aggregation or verification fails."""
+
+class AggregatedSignatureProof(Container):
+    """Stub aggregated signature proof."""
+    participants: Bytes32
+    proof_data: Bytes32
+XMSSEOF
+
+  cat > "$dir/lean_spec/subspecs/xmss/interface.py" << 'XMSSEOF'
+"""Stub XMSS interface for testing without lean_multisig_py."""
+TARGET_SIGNATURE_SCHEME = None
+
+class GeneralizedXmssScheme:
+    pass
+XMSSEOF
+
+  # --- containers/validator.py (REAL file) ---
+  cp "$SRC/subspecs/containers/validator.py" "$dir/lean_spec/subspecs/containers/"
+
+  # --- containers/attestation/ (REAL files + shimmed __init__) ---
+  mkdir -p "$dir/lean_spec/subspecs/containers/attestation"
+  cat > "$dir/lean_spec/subspecs/containers/attestation/__init__.py" << 'INITEOF'
+"""Attestation containers and related types."""
+from .aggregation_bits import AggregationBits
+from .attestation import (
+    AggregatedAttestation,
+    Attestation,
+    AttestationData,
+)
+INITEOF
+  cp "$SRC/subspecs/containers/attestation/aggregation_bits.py" \
+     "$dir/lean_spec/subspecs/containers/attestation/"
+  cp "$SRC/subspecs/containers/attestation/attestation.py" \
+     "$dir/lean_spec/subspecs/containers/attestation/"
+
+  # --- containers/block/ (REAL block.py + modified types.py + shimmed __init__) ---
+  mkdir -p "$dir/lean_spec/subspecs/containers/block"
+  cat > "$dir/lean_spec/subspecs/containers/block/__init__.py" << 'INITEOF'
+"""Block containers (without BlockLookup/SignedBlock which need dict inheritance/deep XMSS)."""
+from .block import Block, BlockBody, BlockHeader
+from .types import AggregatedAttestations, AttestationSignatures
+INITEOF
+  cp "$SRC/subspecs/containers/block/block.py" "$dir/lean_spec/subspecs/containers/block/"
+  # Modified block/types.py: skip BlockLookup (needs dict subclass inheritance)
+  cat > "$dir/lean_spec/subspecs/containers/block/types.py" << 'TYPESEOF'
+"""Block-specific SSZ types (BlockLookup stubbed out — needs dict inheritance)."""
+from __future__ import annotations
+from lean_spec.subspecs.xmss.aggregation import AggregatedSignatureProof
+from lean_spec.types import Bytes32, SSZList
+from ...chain.config import VALIDATOR_REGISTRY_LIMIT
+from ..attestation import AggregatedAttestation
+
+class BlockLookup:
+    """Stub — real version inherits from dict[Bytes32, Block]."""
+    pass
+
+class AggregatedAttestations(SSZList):
+    """List of aggregated attestations included in a block."""
+    LIMIT = int(VALIDATOR_REGISTRY_LIMIT)
+
+class AttestationSignatures(SSZList):
+    """List of per-attestation aggregated signature proofs."""
+    LIMIT = int(VALIDATOR_REGISTRY_LIMIT)
+TYPESEOF
+
+  # --- containers/state/ (REAL files) ---
+  mkdir -p "$dir/lean_spec/subspecs/containers/state"
+  cp "$SRC/subspecs/containers/state/__init__.py" "$dir/lean_spec/subspecs/containers/state/"
+  cp "$SRC/subspecs/containers/state/types.py" "$dir/lean_spec/subspecs/containers/state/"
+  cp "$SRC/subspecs/containers/state/state.py" "$dir/lean_spec/subspecs/containers/state/"
+
+  # --- Update containers/__init__.py to include all container types ---
+  cat > "$dir/lean_spec/subspecs/containers/__init__.py" << 'INITEOF'
+"""Container types for the Lean consensus specification."""
+from .attestation import (
+    AggregatedAttestation,
+    AggregationBits,
+    Attestation,
+    AttestationData,
+)
+from .block import Block, BlockBody, BlockHeader
+from .checkpoint import Checkpoint
+from .config import Config
+from .slot import Slot
+from .state import State
+from .validator import Validator, ValidatorIndex, ValidatorIndices
+INITEOF
+}
+
+# ============================================================
+echo "=== Tier 13: Full containers (Validator, Attestation, AggregationBits, State types) ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_containers_full "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types import Bytes32, Bytes52, Uint64, Boolean
+from lean_spec.subspecs.containers.slot import Slot
+from lean_spec.subspecs.containers.checkpoint import Checkpoint
+
+# --- ValidatorIndex ---
+from lean_spec.subspecs.containers.validator import ValidatorIndex, SubnetId, ValidatorIndices
+
+vi = ValidatorIndex(7)
+print(int(vi))
+# is_proposer_for: 7 % 10 == 7 -> True
+print(vi.is_proposer_for(Slot(7), Uint64(10)))
+# is_proposer_for: 8 % 10 == 8 != 7 -> False
+print(vi.is_proposer_for(Slot(8), Uint64(10)))
+# is_valid: 7 < 10 -> True
+print(vi.is_valid(Uint64(10)))
+# is_valid: 7 < 5 -> False
+print(vi.is_valid(Uint64(5)))
+# compute_subnet_id: 7 % 4 = 3
+sid = vi.compute_subnet_id(Uint64(4))
+print(int(sid))
+
+# --- AggregationBits ---
+from lean_spec.subspecs.containers.attestation.aggregation_bits import AggregationBits
+
+bits = AggregationBits.from_validator_indices(
+    ValidatorIndices(data=[ValidatorIndex(0), ValidatorIndex(3)])
+)
+# Should create bitlist: [True, False, False, True]
+print(len(bits.data))
+print(bool(bits.data[0]))
+print(bool(bits.data[1]))
+print(bool(bits.data[3]))
+
+# Round-trip
+indices = bits.to_validator_indices()
+print(len(indices.data))
+print(int(indices.data[0]))
+print(int(indices.data[1]))
+
+# --- AttestationData ---
+from lean_spec.subspecs.containers.attestation.attestation import (
+    AttestationData, Attestation, AggregatedAttestation,
+)
+
+cp_head = Checkpoint(root=Bytes32(b'\x01' * 32), slot=Slot(5))
+cp_target = Checkpoint(root=Bytes32(b'\x02' * 32), slot=Slot(10))
+cp_source = Checkpoint(root=Bytes32(b'\x03' * 32), slot=Slot(1))
+
+att_data = AttestationData(
+    slot=Slot(10),
+    head=cp_head,
+    target=cp_target,
+    source=cp_source,
+)
+print(int(att_data.slot))
+print(att_data.head.slot == Slot(5))
+
+# --- AggregatedAttestation.aggregate_by_data ---
+atts = [
+    Attestation(validator_id=ValidatorIndex(0), data=att_data),
+    Attestation(validator_id=ValidatorIndex(2), data=att_data),
+    Attestation(validator_id=ValidatorIndex(5), data=att_data),
+]
+aggs = AggregatedAttestation.aggregate_by_data(atts)
+# All same att_data -> 1 aggregation
+print(len(aggs))
+# Aggregation bits cover indices 0, 2, 5 -> length 6
+print(len(aggs[0].aggregation_bits.data))
+
+# --- JustifiedSlots ---
+from lean_spec.subspecs.containers.state.types import JustifiedSlots
+
+js = JustifiedSlots(data=[Boolean(False), Boolean(False), Boolean(True)])
+# Slot at or before finalized -> always justified
+print(bool(js.is_slot_justified(Slot(0), Slot(0))))
+# Slot 1 -> index 0 -> False
+print(bool(js.is_slot_justified(Slot(0), Slot(1))))
+# Slot 3 -> index 2 -> True
+print(bool(js.is_slot_justified(Slot(0), Slot(3))))
+
+# with_justified: set slot 1 to justified
+js2 = js.with_justified(Slot(0), Slot(1), Boolean(True))
+print(bool(js2.is_slot_justified(Slot(0), Slot(1))))
+
+# extend_to_slot: extend to cover slot 6 (index 5)
+js3 = js.extend_to_slot(Slot(0), Slot(6))
+print(len(js3.data))
+
+# shift_window: drop first 2 entries
+js4 = js.shift_window(2)
+print(len(js4.data))
+
+# --- Validator ---
+from lean_spec.subspecs.containers.validator import Validator
+from lean_spec.subspecs.containers.state.types import Validators
+
+v = Validator(
+    attestation_pubkey=Bytes52(b'\xaa' * 52),
+    proposal_pubkey=Bytes52(b'\xbb' * 52),
+    index=ValidatorIndex(42),
+)
+print(int(v.index))
+
+# Validators SSZList
+vals = Validators(data=[v])
+print(len(vals))
+print(int(vals[0].index))
+EOF
+run_test "full containers (validator, attestation, aggregation, state types)" "$DIR" "main.py" "7
+True
+False
+True
+False
+3
+4
+True
+False
+True
+2
+0
+3
+10
+True
+1
+6
+True
+False
+True
+True
+6
+1
+42
+1
+42"
+
+# ============================================================
+echo "=== Tier 14: State machine (generate_genesis, process_slots, process_block, state_transition) ==="
+
+DIR=$(mktemp -d)
+setup_subspecs_containers_full "$DIR"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types import Bytes32, Bytes52, Uint64, Boolean
+from lean_spec.subspecs.containers.slot import Slot
+from lean_spec.subspecs.containers.checkpoint import Checkpoint
+from lean_spec.subspecs.containers.config import Config
+from lean_spec.subspecs.containers.validator import Validator, ValidatorIndex
+from lean_spec.subspecs.containers.block.block import Block, BlockBody, BlockHeader
+from lean_spec.subspecs.containers.block.types import AggregatedAttestations
+from lean_spec.subspecs.containers.state.types import Validators
+from lean_spec.subspecs.containers.state.state import State
+from lean_spec.subspecs.ssz.hash import hash_tree_root
+
+# --- generate_genesis ---
+v1 = Validator(
+    attestation_pubkey=Bytes52(b'\x01' * 52),
+    proposal_pubkey=Bytes52(b'\x02' * 52),
+    index=ValidatorIndex(0),
+)
+v2 = Validator(
+    attestation_pubkey=Bytes52(b'\x03' * 52),
+    proposal_pubkey=Bytes52(b'\x04' * 52),
+    index=ValidatorIndex(1),
+)
+v3 = Validator(
+    attestation_pubkey=Bytes52(b'\x05' * 52),
+    proposal_pubkey=Bytes52(b'\x06' * 52),
+    index=ValidatorIndex(2),
+)
+validators = Validators(data=[v1, v2, v3])
+
+genesis = State.generate_genesis(Uint64(1000), validators)
+print(int(genesis.slot))
+print(int(genesis.config.genesis_time))
+print(len(genesis.validators))
+print(genesis.latest_justified.root == Bytes32.zero())
+print(genesis.latest_finalized.root == Bytes32.zero())
+
+# --- process_slots: advance from 0 to 3 ---
+state1 = genesis.process_slots(Slot(3))
+print(int(state1.slot))
+# After process_slots, latest_block_header.state_root should be filled
+# (genesis header had zero state_root, so first slot caches it)
+print(state1.latest_block_header.state_root != Bytes32.zero())
+
+# --- process_block_header ---
+# Build a block at slot 3
+parent_root = hash_tree_root(state1.latest_block_header)
+# Proposer for slot 3 with 3 validators: 3 % 3 = 0
+block = Block(
+    slot=Slot(3),
+    proposer_index=ValidatorIndex(0),
+    parent_root=parent_root,
+    state_root=Bytes32.zero(),
+    body=BlockBody(attestations=AggregatedAttestations(data=[])),
+)
+state2 = state1.process_block_header(block)
+print(int(state2.slot))
+# latest_block_header should now be for slot 3
+print(int(state2.latest_block_header.slot))
+# State root should be zero (not yet cached until next slot)
+print(state2.latest_block_header.state_root == Bytes32.zero())
+
+# --- state_transition (two-pass build) ---
+# Step 1: process block with zero state_root to get post-state
+state3 = genesis.process_slots(Slot(1))
+parent_root2 = hash_tree_root(state3.latest_block_header)
+# Proposer for slot 1 with 3 validators: 1 % 3 = 1
+trial_block = Block(
+    slot=Slot(1),
+    proposer_index=ValidatorIndex(1),
+    parent_root=parent_root2,
+    state_root=Bytes32.zero(),
+    body=BlockBody(attestations=AggregatedAttestations(data=[])),
+)
+post_state = state3.process_block(trial_block)
+# Step 2: compute real state root and rebuild block
+real_state_root = hash_tree_root(post_state)
+final_block = trial_block.model_copy(update={"state_root": real_state_root})
+# Step 3: full state_transition should succeed
+result_state = genesis.state_transition(final_block)
+print(int(result_state.slot))
+# Verify it's the same post-state
+print(hash_tree_root(result_state) == real_state_root)
+
+# --- negative test: wrong state_root should fail ---
+bad_block = trial_block.model_copy(update={"state_root": Bytes32(b'\xff' * 32)})
+try:
+    genesis.state_transition(bad_block)
+    print("ERROR: should have raised")
+except AssertionError:
+    print("correctly rejected bad state root")
+EOF
+run_test "state machine (genesis, process_slots, process_block, state_transition)" "$DIR" "main.py" "0
+1000
+3
+True
+True
+3
+True
+3
+3
+True
+1
+True
+correctly rejected bad state root"
+
 # ============================================================
 echo ""
 echo "Results: $PASS passed, $FAIL failed"

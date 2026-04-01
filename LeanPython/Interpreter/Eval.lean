@@ -2480,6 +2480,7 @@ partial def getAttributeValue (obj : Value) (attr : String) : InterpM Value := d
     -- Special attributes on class objects
     if attr == "__name__" then return .str cd.name
     if attr == "__mro__" then return .tuple cd.mro
+    if attr == "__bases__" then return .tuple cd.bases
     if attr == "__dict__" then
       let mut pairs : Array (Value × Value) := #[]
       for (k, v) in cd.ns do
@@ -2761,7 +2762,16 @@ partial def evalSubscriptValue (obj idx : Value) : InterpM Value := do
     let cd ← heapGetClassData cref
     match cd.ns["__class_getitem__"]? with
     | some fn => callValueDispatch fn [idx] []
-    | none => return .none  -- default: subscripting a class returns .none (for typing)
+    | none => do
+      -- Default: return the class itself so it can be used as a base (e.g. SSZList[T]).
+      -- Store __pydantic_generic_metadata__ for Pydantic-style generic type inference.
+      let argsArr := match idx with
+        | .tuple items => items
+        | _ => #[idx]
+      let dictRef ← heapAlloc (.dictObj #[(.str "origin", obj), (.str "args", .tuple argsArr)])
+      let ns := cd.ns.insert "__pydantic_generic_metadata__" (.dict dictRef)
+      heapSetClassData cref { cd with ns := ns }
+      return obj
   | .builtin name =>
     -- Allow subscripting on builtin type names for type annotations (list[int], dict[str, int], etc.)
     match name with
