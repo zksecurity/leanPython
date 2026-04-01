@@ -60,6 +60,12 @@ echo 'print("Hello, World!")' > hello.py
 lake exe leanPython hello.py
 ```
 
+The leanSpec tests require pydantic (used by the real leanSpec Python files):
+
+```bash
+pip install pydantic
+```
+
 Run the tests:
 
 ```bash
