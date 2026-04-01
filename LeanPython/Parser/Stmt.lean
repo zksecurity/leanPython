@@ -161,6 +161,10 @@ partial def parseStmtLine : ParserM (List Stmt) := do
     match ← attempt parseMatchStmt with
     | some s => return [s]
     | none => parseSimpleStmts
+  | some (.name "type") =>
+    match ← attempt parseTypeAliasStmt with
+    | some s => return [s]
+    | none => parseSimpleStmts
   | _ => parseSimpleStmts
 
 /-- Parse simple statements on one line, separated by `;`. -/
@@ -631,6 +635,15 @@ partial def parseCaseClause : ParserM MatchCase := do
   discard (expectDelimiter .colon)
   let body ← parseBlock
   return MatchCase.mk pat guard body (← spanFrom start)
+
+/-- Parse `type <name> = <expr>` (PEP 695 type alias, soft keyword). -/
+partial def parseTypeAliasStmt : ParserM Stmt := do
+  let start ← currentSpan
+  discard advance  -- consume soft keyword "type"
+  let (name, _) ← parseName
+  discard (expectOperator .equal)
+  let value ← parseExpression
+  return .typeAlias name value (← spanFrom start)
 
 /-- Parse `match subject: NEWLINE INDENT case+ DEDENT`. -/
 partial def parseMatchStmt : ParserM Stmt := do

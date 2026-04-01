@@ -4099,6 +4099,10 @@ partial def execStmt (s : Stmt) : InterpM Unit := do
           return
       | none => pure ()
 
+  | .typeAlias name expr _ => do
+    let val ← try evalExpr expr catch _ => pure .none
+    setVariable name val
+
 -- Try to match a pattern against a value.
 -- Returns `some bindings` on success, `none` on failure.
 partial def tryMatchPattern (pat : MatchPattern) (val : Value) : InterpM (Option (List (String × Value))) := do

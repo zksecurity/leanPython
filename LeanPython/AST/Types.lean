@@ -182,6 +182,7 @@ inductive Stmt where
   | asyncFor       : Expr → Expr → List Stmt → List Stmt → SourceSpan → Stmt
   | asyncWith      : List WithItem → List Stmt → SourceSpan → Stmt
   | match_         : Expr → List MatchCase → SourceSpan → Stmt
+  | typeAlias      : String → Expr → SourceSpan → Stmt
 
 /-- A single `case` clause in a `match` statement. -/
 inductive MatchCase where
@@ -380,6 +381,7 @@ partial def dumpStmt : Stmt → String
   | .asyncFor t i b e _    => s!"AsyncFor({dumpExpr t}, {dumpExpr i}, {dumpList dumpStmt b}, {dumpList dumpStmt e})"
   | .asyncWith is_ b _     => s!"AsyncWith({dumpList dumpWithItem is_}, {dumpList dumpStmt b})"
   | .match_ s cs _         => s!"Match({dumpExpr s}, {dumpList dumpMatchCase cs})"
+  | .typeAlias n e _       => s!"TypeAlias({n}, {dumpExpr e})"
 
 partial def dumpMatchPattern : MatchPattern → String
   | .matchValue e          => s!"MatchValue({dumpExpr e})"
@@ -491,6 +493,7 @@ partial def stmtContainsYield : Stmt → Bool
   | .asyncWith _ b _ => stmtsContainYield b
   | .match_ e cs _ =>
     exprContainsYield e || cs.any fun c => stmtsContainYield c.body
+  | .typeAlias _ e _ => exprContainsYield e
 
 partial def compContainsYield : Comprehension → Bool
   | .mk t i ifs_ _ =>

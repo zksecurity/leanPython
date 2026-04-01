@@ -447,6 +447,76 @@ False
 42"
 
 # ============================================================
+echo "=== Tier 7: rlp.py (RLP encode/decode) ==="
+
+DIR=$(mktemp -d)
+setup_types_dir_tier6 "$DIR"
+cp "$SRC/types/rlp.py" "$DIR/lean_spec/types/"
+cat > "$DIR/main.py" << 'EOF'
+from lean_spec.types.rlp import encode_rlp, decode_rlp, decode_rlp_list, RLPDecodingError
+
+# Single byte encoding: 0x00-0x7f encode as themselves
+assert encode_rlp(b'\x00') == b'\x00'
+assert encode_rlp(b'\x7f') == b'\x7f'
+print('single byte ok')
+
+# Short string encoding: prefix 0x80 + length
+data = b'hello'
+enc = encode_rlp(data)
+assert enc == b'\x85hello'
+print('short string ok')
+
+# Empty string -> 0x80
+assert encode_rlp(b'') == b'\x80'
+print('empty string ok')
+
+# Empty list -> 0xc0
+assert encode_rlp([]) == b'\xc0'
+print('empty list ok')
+
+# Round-trip: bytes
+rt = decode_rlp(encode_rlp(b'hello'))
+assert rt == b'hello'
+print('round-trip bytes ok')
+
+# Round-trip: flat list
+original = [b'\x01', b'\x02', b'\x03']
+rt = decode_rlp(encode_rlp(original))
+assert rt == original
+print('round-trip list ok')
+
+# Round-trip: nested list
+nested = [b'\x01', [b'\x02', b'\x03']]
+enc = encode_rlp(nested)
+dec = decode_rlp(enc)
+assert dec == nested
+print('nested list ok')
+
+# decode_rlp_list convenience function
+flat = [b'\x01', b'\x02', b'\x03']
+enc = encode_rlp(flat)
+dec = decode_rlp_list(enc)
+assert dec == flat
+print('decode_rlp_list ok')
+
+# Error handling
+try:
+    decode_rlp(b'')
+    assert False, "should have raised"
+except RLPDecodingError:
+    print('error handling ok')
+EOF
+run_test "rlp.py encode/decode" "$DIR" "main.py" "single byte ok
+short string ok
+empty string ok
+empty list ok
+round-trip bytes ok
+round-trip list ok
+nested list ok
+decode_rlp_list ok
+error handling ok"
+
+# ============================================================
 echo ""
 echo "Results: $PASS passed, $FAIL failed"
 [ $FAIL -eq 0 ] && exit 0 || exit 1
